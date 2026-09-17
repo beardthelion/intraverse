@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 import urllib.request
 import urllib.error
 
@@ -75,26 +76,39 @@ class JevClient:
         if not self.api_key:
             raise RuntimeError("TYPESAFE_API_KEY is not set")
 
-    def evaluate(self, state: dict | str, questions: dict | None = None) -> dict:
+    def evaluate(self, state: dict | str, questions: dict | None = None,
+                 retries: int = 3) -> dict:
         body = json.dumps({
             "state": state,
             "model": self.model,
             "questions": questions or QUESTIONS,
         }).encode()
-        req = urllib.request.Request(
-            self.endpoint,
-            data=body,
-            headers={
-                "Authorization": f"Bearer {self.api_key}",
-                "Content-Type": "application/json",
-            },
-            method="POST",
-        )
-        try:
-            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
-                return json.loads(resp.read())
-        except urllib.error.HTTPError as e:
-            raise RuntimeError(f"Jev API error {e.code}: {e.read()[:500]!r}") from e
+        delay = 2.0
+        last: Exception | None = None
+        for attempt in range(retries + 1):
+            req = urllib.request.Request(
+                self.endpoint,
+                data=body,
+                headers={
+                    "Authorization": f"Bearer {self.api_key}",
+                    "Content-Type": "application/json",
+                },
+                method="POST",
+            )
+            try:
+                with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+                    return json.loads(resp.read())
+            except urllib.error.HTTPError as e:
+                payload = e.read()[:500]
+                last = RuntimeError(f"Jev API error {e.code}: {payload!r}")
+                if e.code < 500 and e.code != 429:
+                    raise last from e  # 4xx (except 429) will not heal on retry
+            except (urllib.error.URLError, TimeoutError, OSError) as e:
+                last = RuntimeError(f"Jev request failed: {e}")
+            if attempt < retries:
+                time.sleep(delay)
+                delay *= 4
+        raise last
 
 
 def _noul(answer: dict) -> float:
@@ -133,7 +147,20 @@ class JevDecisionModel(DecisionModel):
         stats: RunStats,
     ) -> PathScores:
         state = path_state(path, graph, checker)
-        resp = self.client.evaluate(state)
+        try:
+            resp = self.client.evaluate(state)
+        except RuntimeError as e:
+            # degrade to a neutral score rather than aborting the run; the
+            # failure counter keeps it visible in metrics
+            stats.jev_failures += 1
+            return PathScores(
+                attacker_control=0.5, trust_boundary_crossing=0.5,
+                authz_boundary_crossing=0.5, sensitive_sink=0.5,
+                insufficient_validation=0.5, invariant_violation=0.5,
+                research_value=0.5, estimated_cost=0.6,
+                continue_exploration=0.5,
+                raw={"error": str(e)},
+            )
         stats.jev_calls += 1
         usage = resp.get("usage") or {}
         stats.jev_input_tokens += int(usage.get("input_tokens", 0))

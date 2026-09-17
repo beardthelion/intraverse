@@ -1,0 +1,130 @@
+[
+  {
+    "class": "command_execution",
+    "sink_file": "routes_b.py",
+    "sink_function": "handle_r001",
+    "sink_line": 14,
+    "note": "unguarded os.popen with tainted arg",
+    "route": "/r001"
+  },
+  {
+    "class": "command_execution",
+    "sink_file": "routes_c.py",
+    "sink_function": "handle_r002",
+    "sink_line": 14,
+    "note": "unguarded os.popen with tainted arg",
+    "route": "/r002"
+  },
+  {
+    "class": "raw_query",
+    "sink_file": "routes_a.py",
+    "sink_function": "handle_r003",
+    "sink_line": 14,
+    "note": "f-string/format SQL interpolation",
+    "route": "/r003"
+  },
+  {
+    "class": "raw_query",
+    "sink_file": "routes_b.py",
+    "sink_function": "handle_r004",
+    "sink_line": 18,
+    "note": "f-string/format SQL interpolation",
+    "route": "/r004"
+  },
+  {
+    "class": "file_access",
+    "sink_file": "routes_c.py",
+    "sink_function": "handle_r005",
+    "sink_line": 18,
+    "note": "unguarded open() on tainted name",
+    "route": "/r005"
+  },
+  {
+    "class": "file_access",
+    "sink_file": "routes_a.py",
+    "sink_function": "handle_r006",
+    "sink_line": 18,
+    "note": "unguarded open() on tainted name",
+    "route": "/r006"
+  },
+  {
+    "class": "outbound_request",
+    "sink_file": "routes_b.py",
+    "sink_function": "handle_r007",
+    "sink_line": 23,
+    "note": "unguarded urlopen on tainted url",
+    "route": "/r007"
+  },
+  {
+    "class": "outbound_request",
+    "sink_file": "routes_c.py",
+    "sink_function": "handle_r008",
+    "sink_line": 23,
+    "note": "unguarded urlopen on tainted url",
+    "route": "/r008"
+  },
+  {
+    "class": "open_redirect",
+    "sink_file": "routes_a.py",
+    "sink_function": "handle_r009",
+    "sink_line": 22,
+    "note": "unguarded redirect target",
+    "route": "/r009"
+  },
+  {
+    "class": "unsafe_deserialization",
+    "sink_file": "routes_b.py",
+    "sink_function": "handle_r010",
+    "sink_line": 30,
+    "note": "pickle.loads on tainted bytes",
+    "route": "/r010"
+  },
+  {
+    "class": "outbound_request",
+    "sink_file": "routes_c.py",
+    "sink_function": "handle_r011",
+    "sink_line": 33,
+    "note": "allowlist contains 'localhost'",
+    "route": "/r011"
+  },
+  {
+    "class": "outbound_request",
+    "sink_file": "routes_a.py",
+    "sink_function": "handle_r012",
+    "sink_line": 29,
+    "note": "blocklist only covers metadata IPs",
+    "route": "/r012"
+  },
+  {
+    "class": "file_access",
+    "sink_file": "routes_b.py",
+    "sink_function": "handle_r013",
+    "sink_line": 39,
+    "note": "guard blocks '/' prefix only, '..' passes",
+    "route": "/r013"
+  },
+  {
+    "class": "command_execution",
+    "sink_file": "routes_c.py",
+    "sink_function": "handle_r014",
+    "sink_line": 42,
+    "note": "blacklist blocks | & ` but not ;",
+    "route": "/r014"
+  },
+  {
+    "class": "open_redirect",
+    "sink_file": "routes_a.py",
+    "sink_function": "handle_r015",
+    "sink_line": 38,
+    "note": "guard accepts any http:// URL",
+    "route": "/r015"
+  },
+  {
+    "class": "raw_query",
+    "sink_file": "routes_b.py",
+    "sink_function": "handle_r016",
+    "sink_line": 46,
+    "note": "blacklist blocks drop/delete only",
+    "route": "/r016"
+  }
+]

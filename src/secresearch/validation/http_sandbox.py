@@ -64,12 +64,29 @@ def _route_and_param(graph: CodeGraph, path: AttackPath) -> tuple[str, str]:
         route = entry.attrs["route"]
     else:
         # route dispatch idioms: path == "/x", self.path == "/x", .startswith("/x").
-        # choose the comparison nearest above the sink line so multi-route
-        # handlers resolve to the branch that contains the sink.
+        # Anchor on the line that calls the path's handler function (correct for
+        # multi-file apps where the sink lives in another file); fall back to the
+        # sink line for single-file handlers.
         sink_line = 0
         sink_node = graph.nodes.get(path.nodes[-1]) if path.nodes else None
         if sink_node:
             sink_line = sink_node.location.line_start
+        call_names = {
+            n.attrs.get("qualname", "").rsplit(".", 1)[-1]
+            for nid in (path.nodes[1:] if path else [])
+            if (n := graph.nodes.get(nid)) and n.type == NodeType.FUNCTION
+        }
+        if call_names:
+            for m in re.finditer(r"\b(\w+)\s*\(", src):
+                if m.group(1) in call_names:
+                    line = src[: m.start()].count("\n") + 1
+                    if sink_node and sink_node.location.file == entry.location.file:
+                        if sink_line and line <= sink_line:
+                            sink_line = line
+                            break
+                    else:
+                        sink_line = line
+                        break
         matches = list(re.finditer(
             r'(?:self\.path|\bpath)\s*(?:==\s*|\.startswith\()\s*["\']([^"\']+)', src
         ))
@@ -94,22 +111,25 @@ def _route_and_param(graph: CodeGraph, path: AttackPath) -> tuple[str, str]:
             if ln <= sink_line:
                 route_line = ln
         region = "\n".join(src.splitlines()[max(0, route_line - 1): sink_line])
-    for nid in path.nodes:
-        n = graph.nodes.get(nid)
-        if n and n.type == NodeType.USER_INPUT:
-            var = n.attrs.get("var", "")
-            m = re.search(rf'{re.escape(var)}\s*=\s*[^\n]*get\(["\']([^"\']+)', region)
-            if m:
-                param = m.group(1)
-                break
-            m = re.search(rf'{re.escape(var)}\s*=\s*\w+\[["\']([^"\']+)', region)
-            if m:
-                param = m.group(1)
-                break
-    if not param:
-        m = re.search(r'\.get\(["\']([a-zA-Z_][a-zA-Z0-9_]*)["\']', region)
+    for scope in (region, src):
+        for nid in path.nodes:
+            n = graph.nodes.get(nid)
+            if n and n.type == NodeType.USER_INPUT:
+                var = n.attrs.get("var", "")
+                m = re.search(rf'{re.escape(var)}\s*=\s*[^\n]*get\(["\']([^"\']+)', scope)
+                if m:
+                    param = m.group(1)
+                    break
+                m = re.search(rf'{re.escape(var)}\s*=\s*\w+\[["\']([^"\']+)', scope)
+                if m:
+                    param = m.group(1)
+                    break
+        if param:
+            break
+        m = re.search(r'\.get\(["\']([a-zA-Z_][a-zA-Z0-9_]*)["\']', scope)
         if m:
             param = m.group(1)
+            break
     return route, param
 
 
@@ -214,8 +234,8 @@ class HttpSandboxValidator(Validator):
             )
         payloads = {
             "command_execution": f"; echo {MARKER}",
-            "file_access": "../../../../../../../../etc/hostname",
-            "file_delete": "../../../../../../../../tmp/nonexistent",
+            "file_access": "../../../../../../../../../../etc/hostname",
+            "file_delete": "../../../../../../../../../../tmp/nonexistent",
             "raw_query": "' OR '1'='1' --",
             "open_redirect": canary_url,
             "template_injection": "{{7*7}}",
@@ -224,6 +244,14 @@ class HttpSandboxValidator(Validator):
         if payload is None:
             return ValidationResult(False, self.name,
                                     detail=f"no live-repro payload for {vuln}")
+        baseline_body = ""
+        if vuln == "raw_query":
+            # baseline-diff: a restrictive term should return no rows while a
+            # boolean-injection payload returns more. An empty "[]" body on the
+            # payload request alone is not evidence (parameterized queries
+            # produce that too).
+            _, baseline_body, _ = self._request(port, route, param,
+                                                "nomatch_xyz_9173")
         status, body, headers = self._request(port, route, param, payload)
         verified = False
         obs = ""
@@ -234,8 +262,9 @@ class HttpSandboxValidator(Validator):
             verified = bool(body.strip()) and status == 200 and "not found" not in body.lower()
             obs = f"file content returned: {body[:80]!r}"
         elif vuln == "raw_query":
-            verified = status == 200 and len(body.strip()) > 0
-            obs = f"query response: {body[:80]!r}"
+            verified = (status == 200 and body != baseline_body
+                        and len(body) > len(baseline_body))
+            obs = f"baseline={baseline_body[:40]!r} payload={body[:80]!r}"
         elif vuln == "open_redirect":
             verified = headers.get("Location", "") == payload or status in (301, 302, 303, 307, 308) and payload in headers.get("Location", "")
             obs = f"Location: {headers.get('Location')}"

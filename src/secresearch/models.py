@@ -357,6 +357,7 @@ class Finding:
 class RunStats:
     jev_calls: int = 0
     jev_input_tokens: int = 0
+    jev_failures: int = 0
     agent_calls: int = 0
     agent_wall_seconds: float = 0.0
     paths_scored: int = 0

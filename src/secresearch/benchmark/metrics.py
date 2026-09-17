@@ -23,7 +23,9 @@ def match_finding(f: Finding, truth: list[dict]) -> dict | None:
             sink_loc and (sink_loc.function.endswith(tfunc) or tfunc in sink_loc.function)
         )
         hit_line = tline is None or bool(
-            sink_loc and abs(sink_loc.line_start - int(tline)) <= 4
+            # tight window: in decoy-dense fixtures same-class sinks sit a few
+            # lines apart, and a loose window mislabels decoys as truth hits
+            sink_loc and abs(sink_loc.line_start - int(tline)) <= 1
         )
         if hit_file and hit_func and hit_line:
             t["matched"] = True
@@ -61,6 +63,7 @@ def compute_metrics(
         "matched_finding_ids": matched_ids,
         "mean_time_to_discovery_s": round(sum(times) / len(times), 2) if times else None,
         "jev_calls": stats.jev_calls,
+        "jev_failures": stats.jev_failures,
         "jev_input_tokens": stats.jev_input_tokens,
         "agent_calls": stats.agent_calls,
         "agent_wall_seconds": round(stats.agent_wall_seconds, 1),
