@@ -1,0 +1,9 @@
+[
+  {
+    "class": "command_execution",
+    "sink_file": "app.py",
+    "sink_function": "do_GET",
+    "sink_line": 29,
+    "note": "command injection: /ping?host= interpolated into os.system"
+  }
+]

@@ -1,0 +1,16 @@
+[
+  {
+    "class": "file_access",
+    "sink_file": "app.py",
+    "sink_function": "do_GET",
+    "sink_line": 55,
+    "note": "path traversal: /download?name= reaches open() with no validation"
+  },
+  {
+    "class": "raw_query",
+    "sink_file": "app.py",
+    "sink_function": "do_GET",
+    "sink_line": 66,
+    "note": "SQLi + missing authorization: /account?id= interpolated into query"
+  }
+]

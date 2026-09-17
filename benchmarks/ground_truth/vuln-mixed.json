@@ -1,0 +1,16 @@
+[
+  {
+    "class": "open_redirect",
+    "sink_file": "app.py",
+    "sink_function": "do_GET",
+    "sink_line": 33,
+    "note": "open redirect: /go?to= controls Location header"
+  },
+  {
+    "class": "unsafe_deserialization",
+    "sink_file": "app.py",
+    "sink_function": "do_POST",
+    "sink_line": 47,
+    "note": "pickle.loads on request body"
+  }
+]

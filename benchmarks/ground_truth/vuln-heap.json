@@ -1,0 +1,6 @@
+[
+  {"class": "outbound_request", "sink_file": "app.py", "sink_function": "do_GET", "sink_line": 109, "note": "SSRF on /proxy"},
+  {"class": "file_access", "sink_file": "app.py", "sink_function": "do_GET", "sink_line": 117, "note": "path traversal on /file"},
+  {"class": "raw_query", "sink_file": "app.py", "sink_function": "do_GET", "sink_line": 125, "note": "SQLi on /doc"},
+  {"class": "command_execution", "sink_file": "app.py", "sink_function": "do_GET", "sink_line": 132, "note": "command injection on /diag"}
+]

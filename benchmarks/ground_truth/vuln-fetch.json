@@ -1,0 +1,9 @@
+[
+  {
+    "class": "outbound_request",
+    "sink_file": "app.py",
+    "sink_function": "do_GET",
+    "sink_line": 32,
+    "note": "SSRF: /fetch?url= reaches urllib.request.urlopen with no validation"
+  }
+]
