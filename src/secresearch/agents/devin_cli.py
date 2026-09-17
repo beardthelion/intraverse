@@ -23,7 +23,8 @@ from ..models import (
 from ..graph.code_graph import CodeGraph
 from .base import InvestigationTask, ResearchAgent
 
-_JSON_RE = re.compile(r"\{.*\}", re.DOTALL)
+_JSON_STARTS = re.compile(r"\{")
+_DECODER = json.JSONDecoder()
 
 REPORT_SCHEMA = """{
   "hypothesis": "the hypothesis you investigated",
@@ -84,19 +85,30 @@ def build_prompt(task: InvestigationTask, graph: CodeGraph) -> str:
     return "\n".join(lines)
 
 
+def _last_json_object(text: str) -> dict | None:
+    """Return the last top-level JSON object in mixed prose output. Positions
+    inside an already-decoded object are skipped so nested braces do not win
+    over the enclosing report, and prose between two objects cannot merge
+    them into one invalid match."""
+    last = None
+    covered = -1
+    for m in _JSON_STARTS.finditer(text):
+        if m.start() < covered:
+            continue
+        try:
+            obj, end = _DECODER.raw_decode(text, m.start())
+        except json.JSONDecodeError:
+            continue
+        covered = end
+        if isinstance(obj, dict):
+            last = obj
+    return last
+
+
 def parse_report(text: str, task: InvestigationTask, wall: float) -> InvestigationReport:
     """Extract the trailing JSON report from agent output."""
-    match = None
-    for m in _JSON_RE.finditer(text):
-        match = m
-    if not match:
-        return InvestigationReport(
-            hypothesis=task.hypothesis, status=InvestigationStatus.UNCERTAIN,
-            agent="devin-cli", wall_seconds=wall, raw=text[-4000:],
-        )
-    try:
-        d = json.loads(match.group(0))
-    except json.JSONDecodeError:
+    d = _last_json_object(text)
+    if d is None:
         return InvestigationReport(
             hypothesis=task.hypothesis, status=InvestigationStatus.UNCERTAIN,
             agent="devin-cli", wall_seconds=wall, raw=text[-4000:],

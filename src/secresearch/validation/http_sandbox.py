@@ -194,15 +194,23 @@ class HttpSandboxValidator(Validator):
                                     detail="could not derive tainted parameter")
         canary_url = f"http://127.0.0.1:{canary_port}/hit"
         if vuln == "outbound_request":
-            payload = canary_url
-            self._request(port, route, param, payload)
-            hit = bool(_Canary.hits)
+            # try both loopback spellings: allowlists that include "localhost"
+            # but not "127.0.0.1" are still bypassable
+            for host in ("127.0.0.1", "localhost"):
+                payload = f"http://{host}:{canary_port}/hit"
+                self._request(port, route, param, payload)
+                if _Canary.hits:
+                    return ValidationResult(
+                        verified=True, method=self.name,
+                        reproduction=f"GET {route}?{param}={payload} caused server-side fetch",
+                        evidence=_Canary.hits[:],
+                        detail="canary listener observed inbound request",
+                    )
             return ValidationResult(
-                verified=hit, method=self.name,
-                reproduction=f"GET {route}?{param}=<canary-url> caused server-side fetch",
-                evidence=_Canary.hits[:],
-                detail="canary listener observed inbound request" if hit
-                else "no canary hit",
+                verified=False, method=self.name,
+                reproduction=f"GET {route}?{param}=<canary-url>",
+                evidence=[],
+                detail="no canary hit",
             )
         payloads = {
             "command_execution": f"; echo {MARKER}",

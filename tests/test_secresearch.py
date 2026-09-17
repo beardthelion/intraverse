@@ -184,6 +184,87 @@ class TestOrchestrator(unittest.TestCase):
         self.assertLessEqual(result.stats.iterations, 20)
 
 
+class TestJevParsing(unittest.TestCase):
+    def test_score_normalized_by_rungs(self):
+        # the API returns interpolated scores on a 0-indexed 0..4 rung scale;
+        # a raw score of 1.0 is rung 1 of 4, not probability 1.0
+        from secresearch.decision.jev import _score01
+        self.assertAlmostEqual(_score01({"score": 4.0}), 1.0)
+        self.assertAlmostEqual(_score01({"score": 2.0}), 0.5)
+        self.assertAlmostEqual(_score01({"score": 1.04}), 0.26)
+        self.assertAlmostEqual(_score01({"score": 0.0}), 0.0)
+
+    def test_score_distribution_fallback(self):
+        from secresearch.decision.jev import _score01
+        dist = {"distribution": {"a": 0.0, "b": 0.0, "c": 0.0, "d": 0.0, "e": 1.0}}
+        self.assertAlmostEqual(_score01(dist), 1.0)
+
+    def test_noul_defaults_to_half(self):
+        from secresearch.decision.jev import _noul
+        self.assertEqual(_noul({}), 0.5)
+        self.assertEqual(_noul({"noul": 0.9}), 0.9)
+
+
+class TestDevinReportParsing(unittest.TestCase):
+    def _task(self):
+        graph, paths = analyze("vuln-fetch")
+        return InvestigationTask(path=paths[0], hypothesis="h", invariants=[])
+
+    def test_parses_trailing_json(self):
+        from secresearch.agents.devin_cli import parse_report
+        text = ('prose analysis first\n{"hypothesis": "h", "status": "confirmed",'
+                ' "evidence": [{"kind": "reachability", "summary": "reaches sink",'
+                ' "file": "app.py", "line_start": 32, "line_end": 32}],'
+                ' "new_paths": [{"description": "alt", "node_labels": ["a","b"],'
+                ' "source_hint": "", "sink_hint": ""}],'
+                ' "next_questions": ["q1"]}')
+        rep = parse_report(text, self._task(), 1.0)
+        self.assertEqual(rep.status, InvestigationStatus.CONFIRMED)
+        self.assertEqual(len(rep.evidence), 1)
+        self.assertEqual(len(rep.new_paths), 1)
+        self.assertEqual(rep.next_questions, ["q1"])
+
+    def test_uses_last_json_object(self):
+        from secresearch.agents.devin_cli import parse_report
+        text = ('{"status": "uncertain"} more prose '
+                '{"hypothesis": "h", "status": "falsified", "evidence": []}')
+        rep = parse_report(text, self._task(), 1.0)
+        self.assertEqual(rep.status, InvestigationStatus.FALSIFIED)
+
+    def test_no_json_is_uncertain(self):
+        from secresearch.agents.devin_cli import parse_report
+        rep = parse_report("no structured output here", self._task(), 1.0)
+        self.assertEqual(rep.status, InvestigationStatus.UNCERTAIN)
+
+
+class TestHttpSandbox(unittest.TestCase):
+    def test_localhost_allowlist_bypass_verified(self):
+        # /fetch-safe allowlists "localhost"; a loopback canary URL must still
+        # produce a server-side fetch, proving the guard is bypassable
+        from secresearch.validation.http_sandbox import HttpSandboxValidator
+        from secresearch.models import InvestigationReport
+        graph, paths = analyze("vuln-fetch")
+        target = next(p for p in paths if sink_line(graph, p) == 42)
+        rep = InvestigationReport(
+            hypothesis="h", status=InvestigationStatus.CONFIRMED, agent="t")
+        v = HttpSandboxValidator(str(FIXTURES / "vuln-fetch"))
+        res = v.validate(target, rep, graph)
+        self.assertTrue(res.verified, res.detail)
+
+    def test_no_vuln_means_unverified(self):
+        from secresearch.validation.http_sandbox import HttpSandboxValidator
+        from secresearch.models import InvestigationReport
+        graph, paths = analyze("clean-app")
+        target = next(
+            p for p in paths
+            if graph.nodes[p.nodes[-1]].attrs.get("vuln") == "command_execution")
+        rep = InvestigationReport(
+            hypothesis="h", status=InvestigationStatus.CONFIRMED, agent="t")
+        v = HttpSandboxValidator(str(FIXTURES / "clean-app"))
+        res = v.validate(target, rep, graph)
+        self.assertFalse(res.verified)
+
+
 class TestMetrics(unittest.TestCase):
     def test_match_by_class_file_line(self):
         from secresearch.models import Finding, ValidationStatus
