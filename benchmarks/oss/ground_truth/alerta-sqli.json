@@ -1,0 +1,26 @@
+[
+  {
+    "class": "raw_query",
+    "sink_file": "alerta/database/backends/postgres/base.py",
+    "sink_function": "_fetchall",
+    "sink_line": 1605,
+    "route": "/alerts",
+    "note": "CVE-2026-34400: q= param parsed by QueryParser into raw WHERE fragment, interpolated into SELECT, executed here"
+  },
+  {
+    "class": "raw_query",
+    "sink_file": "alerta/database/backends/postgres/base.py",
+    "sink_function": "_updateall",
+    "sink_line": 1624,
+    "route": "/_bulk/alerts/tag",
+    "note": "CVE-2026-34400: q= WHERE fragment interpolated into UPDATE via bulk tag/untag/status endpoints"
+  },
+  {
+    "class": "raw_query",
+    "sink_file": "alerta/database/backends/postgres/base.py",
+    "sink_function": "_deleteall",
+    "sink_line": 1650,
+    "route": "/alerts",
+    "note": "CVE-2026-34400: q= WHERE fragment interpolated into DELETE via delete_alerts"
+  }
+]

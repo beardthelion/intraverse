@@ -10,7 +10,7 @@ from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Any
 
-from ..models import AttackPath, NodeType, PathScores, RunStats
+from ..models import AttackPath, EdgeType, NodeType, PathScores, RunStats
 from ..graph.code_graph import CodeGraph
 from ..graph.invariants import InvariantChecker
 
@@ -25,7 +25,8 @@ def path_state(path: AttackPath, graph: CodeGraph, checker: InvariantChecker,
     feats = checker.features(path)
     hops = []
     root = Path(graph.root)
-    for h in feats["hops"][:max_hops]:
+    node_ids = path.nodes[:max_hops]
+    for i, h in enumerate(feats["hops"][:max_hops]):
         excerpt = ""
         try:
             src = (root / h["file"]).read_text(errors="replace").splitlines()
@@ -34,7 +35,24 @@ def path_state(path: AttackPath, graph: CodeGraph, checker: InvariantChecker,
             excerpt = "\n".join(f"{i+1}: {src[i]}" for i in range(lo, hi))
         except OSError:
             pass
-        hops.append({**h, "code": excerpt})
+        hop = {**h, "code": excerpt}
+        # Include the call-site line for the next hop so the model can see
+        # which argument carried taint across the edge (e.g. send(base_url=q)
+        # vs send(base_url=FIXED, query=q)).
+        if i + 1 < len(node_ids):
+            for e in graph.out_edges(node_ids[i], EdgeType.CALLS):
+                if e.dst == node_ids[i + 1]:
+                    try:
+                        csrc = (root / e.location.file).read_text(
+                            errors="replace").splitlines()
+                        ln = e.location.line_start - 1
+                        hop["call_site"] = (
+                            f"{e.location.file}:{e.location.line_start}: "
+                            f"{csrc[ln].strip()}")
+                    except (OSError, IndexError):
+                        pass
+                    break
+        hops.append(hop)
     funcs = {
         n.attrs.get("qualname", n.label.rstrip("()")): n
         for n in graph.nodes_of_type(NodeType.FUNCTION)

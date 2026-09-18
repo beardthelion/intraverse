@@ -56,6 +56,7 @@ def run_benchmark(
     output_dir: str = "runs/benchmark",
     verbose: bool = False,
     seed: int = 0,
+    fixture_filter: str | None = None,
 ) -> BenchmarkReport:
     from ..cli import _build_stack
 
@@ -65,6 +66,8 @@ def run_benchmark(
     report = BenchmarkReport()
 
     for fixture in sorted(p for p in fixtures_dir.iterdir() if p.is_dir()):
+        if fixture_filter and fixture.name != fixture_filter:
+            continue
         truth_path = truth_dir / f"{fixture.name}.json"
         ground_truth = json.loads(truth_path.read_text()) if truth_path.exists() else []
         for strategy in strategies:

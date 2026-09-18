@@ -1,0 +1,50 @@
+[
+  {
+    "class": "outbound_request",
+    "sink_file": "app/request.py",
+    "sink_function": "send",
+    "sink_line": 339,
+    "route": "/element",
+    "note": "CVE-2024-22205 SSRF: element endpoint sends request.args url via Request.send"
+  },
+  {
+    "class": "outbound_request",
+    "sink_file": "app/request.py",
+    "sink_function": "send",
+    "sink_line": 339,
+    "route": "/window",
+    "note": "CVE-2024-22205 SSRF: window endpoint sends request.args location via Request.send"
+  },
+  {
+    "class": "unsafe_deserialization",
+    "sink_file": "app/routes.py",
+    "sink_function": "config",
+    "sink_line": 430,
+    "route": "/config",
+    "note": "pickle.load on attacker-named config file (traversal + deser)"
+  },
+  {
+    "class": "file_access",
+    "sink_file": "app/routes.py",
+    "sink_function": "config",
+    "sink_line": 430,
+    "route": "/config",
+    "note": "open() reads attacker-named path under CONFIG_PATH"
+  },
+  {
+    "class": "file_access",
+    "sink_file": "app/routes.py",
+    "sink_function": "config",
+    "sink_line": 445,
+    "route": "/config",
+    "note": "open() writes attacker-named path via pickle.dump"
+  },
+  {
+    "class": "open_redirect",
+    "sink_file": "app/routes.py",
+    "sink_function": "config",
+    "sink_line": 450,
+    "route": "/config",
+    "note": "redirect(config_data['url']) with user-controlled target"
+  }
+]

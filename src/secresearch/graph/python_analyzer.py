@@ -175,8 +175,13 @@ class PythonAnalyzer(CodeGraphProvider):
         root = Path(repo_root).resolve()
         functions: dict[str, _FunctionInfo] = {}
         methods_by_name: dict[str, list[str]] = {}
+        skip_dirs = {"test", "tests", "testing", "venv", ".venv",
+                     "node_modules", "__pycache__", "docs", "examples"}
         for py in sorted(root.rglob("*.py")):
             rel = str(py.relative_to(root))
+            if set(py.relative_to(root).parts[:-1]) & skip_dirs \
+                    or py.name.startswith("test_") or py.name.endswith("_test.py"):
+                continue
             try:
                 tree = ast.parse(py.read_text(errors="replace"))
             except SyntaxError:
@@ -316,6 +321,11 @@ class PythonAnalyzer(CodeGraphProvider):
                 return expr_taint(e.value)
             if isinstance(e, ast.BinOp):
                 return expr_taint(e.left) | expr_taint(e.right)
+            if isinstance(e, ast.BoolOp):
+                labels = set()
+                for v in e.values:
+                    labels |= expr_taint(v)
+                return labels
             if isinstance(e, (ast.Tuple, ast.List)):
                 labels = set()
                 for x in e.elts:
@@ -453,16 +463,23 @@ class PythonAnalyzer(CodeGraphProvider):
                     if not callee or callee == qualname:
                         continue
                     target = functions[callee]
-                    args = call.args
-                    for i, a in enumerate(args):
-                        if i >= len(target.params):
-                            break
+                    named: dict[str, ast.expr] = {}
+                    for i, a in enumerate(call.args):
+                        if i < len(target.params):
+                            named[target.params[i]] = a
+                    for kw in call.keywords:
+                        if kw.arg:
+                            named[kw.arg] = kw.value
+                        else:  # **kwargs splat: taint all params conservatively
+                            for pname in target.params:
+                                named.setdefault(pname, kw.value)
+                    for pname, a in named.items():
+                        if pname not in target.params:
+                            continue
                         labels = self._expr_taint_in(info, a)
-                        if labels:
-                            pname = target.params[i]
-                            if pname not in target.tainted_params:
-                                target.tainted_params.add(pname)
-                                next_round.append(callee)
+                        if labels and pname not in target.tainted_params:
+                            target.tainted_params.add(pname)
+                            next_round.append(callee)
             worklist = next_round
 
     def _expr_taint_in(self, info: _FunctionInfo, e: ast.expr) -> set[str]:

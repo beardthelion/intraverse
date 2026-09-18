@@ -159,6 +159,59 @@ zero FPs — devin confirmed 5 of the 6 bypassable-guard vulns per rep,
 including the `localhost`-allowlist SSRF, the `|`-only command blacklist,
 and the quote-stripping SQLi.
 
+## Real-OSS experiment (benchmarks/oss)
+
+Two real repos at pre-fix commits, vendored into `benchmarks/oss/fixtures/`:
+
+- **whoogle-search** @ `3a2e0b2~1` (CVE-2024-22205, SSRF in `element`/`window`
+  endpoints): 11 candidate paths, ~6 real vulns (2 SSRF + traversal/deser/
+  redirect in the config endpoints), budget 6 picks.
+- **alerta** v9.0.0 (CVE-2026-34400, SQLi via the `q=` query param parsed into
+  a raw `WHERE` fragment): 62 candidate paths, ~28 endpoints sharing the
+  vulnerable `qb.*.from_params(request.args)` flow, budget 12 picks.
+
+**Analyzer fixes real code required.** Three gaps only real repos exposed:
+`x or default` (BoolOp) dropped taint, keyword args (`send(base_url=q)`)
+were never propagated into callee params, and test suites were being
+scanned as attack surface. All three are fixed; the CVE chains enumerate
+on both repos.
+
+**Scoring caveat found on real code.** Sink-line truth matching is unsound
+when many flows share a helper: 5 whoogle paths converge on
+`requests.get` @request.py:339 and every alerta query funnels through the
+same `cursor.execute` helpers. Naive matching scored static alerta TP=2 —
+route-aware scoring (`benchmarks/oss/score.py`, a finding counts only if
+its *entry* is a genuinely vulnerable endpoint) revises that to TP=0.
+
+Route-aware results (stub agent):
+
+```
+fixture       strategy   n   TP         FP         picks-on-vuln-routes
+alerta-sqli   jev        3   4.0        8.0        4/12
+alerta-sqli   random     2   4.0        8.0        4/12
+alerta-sqli   static     2   0.0        12.0       0/12
+whoogle-ssrf  jev        5   3.4 [3-4]  2.6 [2-3]  CVE paths: 0
+whoogle-ssrf  static     2   3.0        3.0        CVE paths: 0
+whoogle-ssrf  random     3   2.0        4.0        CVE paths: 0
+whoogle-ssrf  baseline   2   3.0        3.0        CVE paths: 0
+```
+
+**What it means.** On alerta, Jev put the real CVE flows (`/_bulk/alerts`,
+`/keys`) in the top 12 every rep while static actively anti-selected them
+(0/12) — but random matched Jev because ~40% of alerta's paths are vuln
+routes, so density does the work for chance. On whoogle, no ranker found
+the actual CVE: element/window ranked 7-8 of 11, just under the 6-pick
+budget. Adding call-site excerpts to the state (so the model sees
+`send(base_url=src_url)` vs `send(base_url=FIXED, query=q)`) moved them
+up one rank but not across the line. Devin confirmed the element SSRF in
+91s when handed the path directly — the miss is ranker-side.
+
+The limiting signal is semantic: "user input reaches a fetch" scores high
+whether the fetch is intended (autocomplete, rank 3) or arbitrary
+(element SSRF, rank 7). Distinguishing intended from unintended use is the
+frontier — the imgres endpoint, whose *purpose* is redirecting, ranked #1
+of 11 as open_redirect.
+
 ## Conclusions
 
 1. **Did Jev improve path selection?** Yes, measurably, once candidates
@@ -196,13 +249,15 @@ and the quote-stripping SQLi.
    injections). Second bottleneck: validator soundness — static proof
    verifies paths whose guards it cannot see, turning ranker noise into FPs.
 
-6. **What experiment should run next?** (a) Point the pipeline at a real
-   authorized OSS repo with known CVEs to see if candidate counts reach the
-   regime where ranking dominates. (b) Larger devin ablation (n>=5) once
-   per-run cost is tolerable; two reps is a hint, not a measurement.
-   (c) Residual ranker noise: `os.path.basename` decoys still score 0.77-0.84
-   bypassable — either a sharper question or a second opinion dimension
-   ("is the guard applied to the exact value reaching the sink?") may cut it.
+6. **What experiment should run next?** (a) Intended-use scoring: the OSS
+   run shows "user input reaches sink" can't separate intended fetches from
+   SSRF — a question like "does this endpoint's purpose justify the input
+   reaching this operation, or does the input control more than it should?"
+   is the next discriminating dimension. (b) More real repos: alerta is
+   vuln-dense (random ≈ Jev) and whoogle is small — a mid-size repo with a
+   single sparse CVE would be the cleanest test yet. (c) Larger devin
+   ablation (n>=5) once per-run cost is tolerable; two reps is a hint, not
+   a measurement.
 
 7. **Methodological note.** "Verified TP" confounds ranker and investigator
    quality: the gb reruns have identical Jev picks under stub and devin, but
