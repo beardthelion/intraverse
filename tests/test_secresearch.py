@@ -426,6 +426,106 @@ class TestJevParsing(unittest.TestCase):
                       + guard["definition"].get("module_constants", ""))
 
 
+class TestSinkReach(unittest.TestCase):
+    def test_pathscores_roundtrips_sink_reach(self):
+        from secresearch.models import PathScores
+        s = PathScores(sink_reach=0.7)
+        self.assertAlmostEqual(
+            PathScores.from_dict(s.to_dict()).sink_reach, 0.7)
+
+    def test_score_path_maps_sink_reach(self):
+        from secresearch.decision.jev import JevDecisionModel
+        from secresearch.models import RunStats
+
+        class FakeClient:
+            def evaluate(self, state, questions=None):
+                return {"answers": {"sink_reach": {"noul": 0.85}},
+                        "usage": {}}
+
+        graph, paths = analyze("vuln-fetch")
+        checker = InvariantChecker(graph)
+        model = JevDecisionModel(client=FakeClient())
+        self.assertAlmostEqual(
+            model.score_path(paths[0], graph, checker, RunStats()).sink_reach,
+            0.85)
+
+    def test_fallback_scores_sink_reach_neutral(self):
+        from secresearch.decision.jev import JevDecisionModel
+        from secresearch.models import RunStats
+
+        class FailingClient:
+            def evaluate(self, state, questions=None):
+                raise RuntimeError("down")
+
+        graph, paths = analyze("vuln-fetch")
+        checker = InvariantChecker(graph)
+        model = JevDecisionModel(client=FailingClient())
+        scores = model.score_path(paths[0], graph, checker, RunStats())
+        self.assertEqual(scores.sink_reach, 0.5)
+
+    def test_priority_includes_sink_reach_weight(self):
+        from secresearch.models import PathScores
+        cfg = ScanConfig()
+        base = PathScores(estimated_cost=0.5)
+        boosted = PathScores(estimated_cost=0.5, sink_reach=1.0)
+        self.assertGreater(cfg.priority(boosted), cfg.priority(base))
+
+    def test_state_shows_post_sink_consumers(self):
+        # the consequence question is blind unless the state shows where the
+        # sink's return value goes
+        from secresearch.decision.base import path_state
+        graph, paths = analyze_src({
+            "a.py": (
+                "import requests\n"
+                "from http.server import BaseHTTPRequestHandler\n"
+                "class H(BaseHTTPRequestHandler):\n"
+                "    def do_GET(self):\n"
+                "        url = self.path\n"
+                "        s = requests.Session()\n"
+                "        r = s.request(method='GET', url=url)\n"
+                "        self.body = r.text\n"
+            ),
+        })
+        checker = InvariantChecker(graph)
+        sinks = [p for p in paths
+                 if graph.nodes[p.nodes[-1]].attrs.get("vuln")
+                 == "outbound_request"]
+        self.assertTrue(sinks)
+        state = path_state(sinks[0], graph, checker)
+        self.assertIn("self.body = r.text",
+                      state["hops"][-1].get("post_sink", ""))
+
+    def test_state_post_sink_empty_when_result_unused(self):
+        from secresearch.decision.base import path_state
+        graph, paths = analyze_src({
+            "a.py": (
+                "import requests\n"
+                "from http.server import BaseHTTPRequestHandler\n"
+                "class H(BaseHTTPRequestHandler):\n"
+                "    def do_GET(self):\n"
+                "        url = self.path\n"
+                "        s = requests.Session()\n"
+                "        s.request(method='GET', url=url)\n"
+            ),
+        })
+        checker = InvariantChecker(graph)
+        sinks = [p for p in paths
+                 if graph.nodes[p.nodes[-1]].attrs.get("vuln")
+                 == "outbound_request"]
+        self.assertTrue(sinks)
+        state = path_state(sinks[0], graph, checker)
+        self.assertFalse(state["hops"][-1].get("post_sink"))
+
+
+class TestConfigDefaults(unittest.TestCase):
+    def test_max_paths_matches_generator_default(self):
+        # benchmark runs truncated stored-source paths for two phases
+        # because ScanConfig.max_paths overrode the generator default
+        from secresearch.graph.path_generator import GraphPathGenerator
+        self.assertGreaterEqual(
+            ScanConfig().max_paths, GraphPathGenerator().max_paths)
+
+
 class TestDevinReportParsing(unittest.TestCase):
     def _task(self):
         graph, paths = analyze("vuln-fetch")

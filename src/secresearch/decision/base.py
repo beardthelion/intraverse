@@ -15,6 +15,58 @@ from ..graph.code_graph import CodeGraph
 from ..graph.invariants import InvariantChecker
 
 
+def _post_sink_lines(root: Path, sink_hop: dict, graph: CodeGraph,
+                     max_lines: int = 16) -> str:
+    """Lines in the sink's enclosing function that consume the sink call's
+    return value: where the fetched/decoded result actually goes.
+
+    The sink question asks about consequence, so the state must show the
+    consequence: ``self.content = r.text`` can sit dozens of lines after
+    ``r = session.request(...)``, outside the hop excerpt window.
+    """
+    fn = None
+    for t in (NodeType.FUNCTION, NodeType.HTTP_ENTRY, NodeType.CLI_ENTRY,
+              NodeType.EVENT_CONSUMER):
+        for f in graph.nodes_of_type(t):
+            loc = f.location
+            end = loc.line_end or loc.line_start
+            if loc.file == sink_hop["file"] \
+                    and loc.line_start <= sink_hop["line"] <= end:
+                if fn is None or end - loc.line_start < \
+                        (fn.location.line_end or fn.location.line_start) \
+                        - fn.location.line_start:
+                    fn = f
+    if fn is None:
+        return ""
+    try:
+        src = (root / fn.location.file).read_text(
+            errors="replace").splitlines()
+    except OSError:
+        return ""
+    call_line = src[sink_hop["line"] - 1] \
+        if 0 < sink_hop["line"] <= len(src) else ""
+    m = re.match(r"\s*(\w+)\s*=[^=]", call_line)
+    if not m:
+        return ""
+    tracked = {m.group(1)}
+    out = []
+    last = min(fn.location.line_end or sink_hop["line"], len(src))
+    for lineno in range(sink_hop["line"] + 1, last + 1):
+        line = src[lineno - 1]
+        if not any(re.search(rf"\b{v}\b", line) for v in tracked):
+            continue
+        # one level of propagation: `res = r.json()` also tracks `res`
+        am = re.match(r"\s*(\w+)\s*=[^=]", line)
+        if am and re.search(
+                rf"\b{'|'.join(re.escape(v) for v in tracked)}\b",
+                line.split("=", 1)[1]):
+            tracked.add(am.group(1))
+        out.append(f"{lineno}: {line.rstrip()}")
+        if len(out) >= max_lines:
+            break
+    return "\n".join(out)
+
+
 def path_state(path: AttackPath, graph: CodeGraph, checker: InvariantChecker,
                max_hops: int = 12, excerpt_lines: int = 4) -> dict[str, Any]:
     """Build the shared state object handed to a decision model.
@@ -26,6 +78,7 @@ def path_state(path: AttackPath, graph: CodeGraph, checker: InvariantChecker,
     hops = []
     root = Path(graph.root)
     node_ids = path.nodes[:max_hops]
+    n_hops = len(feats["hops"])
     for i, h in enumerate(feats["hops"][:max_hops]):
         excerpt = ""
         try:
@@ -52,6 +105,8 @@ def path_state(path: AttackPath, graph: CodeGraph, checker: InvariantChecker,
                     except (OSError, IndexError):
                         pass
                     break
+        if i == n_hops - 1:
+            hop["post_sink"] = _post_sink_lines(root, h, graph)
         hops.append(hop)
     funcs = {
         n.attrs.get("qualname", n.label.rstrip("()")): n
@@ -107,7 +162,7 @@ def path_state(path: AttackPath, graph: CodeGraph, checker: InvariantChecker,
             except OSError:
                 pass
         guards.append(guard)
-    return {
+    state = {
         "path_id": path.id,
         "hypothesis": path.hypothesis,
         "prior_investigations": path.iterations_investigated,
@@ -125,6 +180,10 @@ def path_state(path: AttackPath, graph: CodeGraph, checker: InvariantChecker,
         "hops": hops,
         "guards": guards,
     }
+    if n_hops > max_hops and feats["hops"]:
+        state["post_sink"] = _post_sink_lines(
+            root, feats["hops"][-1], graph)
+    return state
 
 
 class DecisionModel(ABC):

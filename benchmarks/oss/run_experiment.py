@@ -49,7 +49,7 @@ def append(row: dict) -> None:
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("phase", choices=["stub", "devin", "stub-uu", "stub2", "stub3"])
+    ap.add_argument("phase", choices=["stub", "devin", "stub-uu", "stub2", "stub3", "stub4"])
     args = ap.parse_args()
 
     # per-fixture budgets: paths must outnumber picks for ranking to matter
@@ -67,7 +67,21 @@ def main() -> None:
               f"FP={m['false_positives']} missed={m['missed']} "
               f"jev_fail={m.get('jev_failures', 0)}", flush=True)
 
-    if args.phase == "stub3":
+    if args.phase == "stub4":
+        # sink_reach dimension (weight 0.15, post-sink lines in path_state):
+        # asks what the sink reaches or returns when the shown checks fail
+        # and where the result goes. cdio jev x5 is the primary measurement;
+        # static/baseline get one rep each as heuristic reference; whoogle
+        # and alerta jev x3 check for regressions.
+        for rep in range(5):
+            go("cdio-lfr", "jev", "stub", 0, rep)
+        for rep in range(1):
+            go("cdio-lfr", "static", "stub", 0, rep)
+            go("cdio-lfr", "baseline", "stub", 0, rep)
+        for rep in range(3):
+            go("alerta-sqli", "jev", "stub", 0, rep)
+            go("whoogle-ssrf", "jev", "stub", 0, rep)
+    elif args.phase == "stub3":
         # post-provenance analyzer: user-stored:* labels on store reads whose
         # backing root received tainted writes; ast.Dict taint added paths to
         # every fixture (cdio 110->118, alerta 78->87, whoogle 11->14).

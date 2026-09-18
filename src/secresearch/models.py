@@ -202,6 +202,10 @@ class PathScores:
     # fetch, which file to open, which query to run — vs. content the
     # feature exists to pass through)
     unintended_use: float = 0.0
+    # P(the sink, past the shown checks, reaches or returns something the
+    # feature does not intend: file contents into attacker-visible state,
+    # an arbitrary scheme or internal host fetched, code execution)
+    sink_reach: float = 0.0
     estimated_cost: float = 1.0
     continue_exploration: float = 0.5
     raw: dict[str, Any] = field(default_factory=dict)

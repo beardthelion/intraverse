@@ -77,6 +77,21 @@ QUESTIONS: dict[str, dict] = {
             "through IS the feature's documented purpose."
         ),
     },
+    "sink_reach": {
+        "type": "noul",
+        "instructions": (
+            "Assume the attacker-controlled value reaches this sink and the "
+            "shown checks fail to stop it. What does the operation then reach "
+            "or return, and where does that result go? Use the post-sink "
+            "lines shown for the sink hop. Answer high only when you can name "
+            "a concrete post-check outcome (local file contents land in state "
+            "the attacker views, an arbitrary URI scheme or internal host is "
+            "fetched, code runs). Answer low when the outcome is the feature "
+            "working as designed, or when the check's semantics pin the "
+            "operation to a fixed target so a hostile input gains nothing "
+            "(a fetch that can only ever reach one pinned host)."
+        ),
+    },
     "research_value": {
         "type": "score",
         "instructions": "How likely is deep investigation of this path to produce a real, exploitable vulnerability?",
@@ -187,7 +202,7 @@ class JevDecisionModel(DecisionModel):
                 attacker_control=0.5, trust_boundary_crossing=0.5,
                 authz_boundary_crossing=0.5, sensitive_sink=0.5,
                 insufficient_validation=0.5, invariant_violation=0.5,
-                research_value=0.5, estimated_cost=0.6,
+                research_value=0.5, sink_reach=0.5, estimated_cost=0.6,
                 continue_exploration=0.5,
                 raw={"error": str(e)},
             )
@@ -209,6 +224,7 @@ class JevDecisionModel(DecisionModel):
             research_value=_score01(answers.get("research_value", {})),
             guard_bypassable=bypass,
             unintended_use=_noul(answers.get("unintended_use", {})),
+            sink_reach=_noul(answers.get("sink_reach", {})),
             estimated_cost=0.2 + 0.8 * _score01(answers.get("investigation_cost", {})),
             continue_exploration=_noul(answers.get("continue_exploration", {})),
             raw={"answers": answers, "model": resp.get("model")},

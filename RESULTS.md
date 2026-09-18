@@ -273,31 +273,34 @@ necessary on real code:
   when it precedes the outgoing call edge). The `guard_bypassable`
   machinery engages on the real-world guard shape.
 - **Enumeration cap**: `max_paths=500` silently truncated alerta (62 of
-  78 real paths) and hid every stored-source path on cdio. Now 20000.
+  78 real paths) and hid every stored-source path on cdio. Raised to
+  20000 in the generator default, but see the stub4 section: the
+  `ScanConfig.max_paths=500` override kept truncating every benchmark
+  run until it was fixed there.
 - **Propagation fix**: `_expr_taint_in` only saw tainted `Name` nodes,
   so `f(url=self.watch.link)` never propagated; attribute/stored reads
   in call args now carry taint.
 
-Route-aware results (stub agent, 12 picks/110 paths):
+Route-aware results (stub agent, 12 picks; runs generated 73 paths,
+see the stub4 correction):
 
 ```
 fixture    strategy   n   TP   FP    note
-cdio-lfr   jev        5   0    12    CVE path ranked ~14 every rep
+cdio-lfr   jev        5   0    12    /start variant in pool, never picked
 cdio-lfr   random     3   0    10
 cdio-lfr   static     2   0    12
-cdio-lfr   baseline   2   1    11    CVE path is early in enum order
+cdio-lfr   baseline   2   1    11    /start variant early in enum order
 alerta     jev        3   2    10    was 4 under the 62-path analyzer
 alerta     random     2   4    8     density still does the work
 alerta     static     2   0    12
 ```
 
-Sobering on two axes. On cdio, no ranker found the CVE: Jev ranks the
-`self.watch -> ... -> session.request` path ~14th, just under budget —
-its scores are internally consistent (gb=0.62 sees the weak check) but
-"fetch the stored URL" IS the app's core feature, so unintended_use
-legitimately drags it and insufficient_validation stays middling. The
-flat baseline found it twice only because it sits early in enumeration
-order. And on alerta, the analyzer improvements HURT jev (4 -> 2 route-
+Sobering on two axes. On cdio, no ranker found the CVE by ranking:
+Jev never picked the `/<string:uuid>/start -> ... -> session.request`
+variant that WAS in the pool (the `self.watch` stored-source variant
+was truncated away, see stub4), and the flat baseline found it only
+because it sits early in enumeration order. And on alerta, the analyzer
+improvements HURT jev (4 -> 2 route-
 aware TPs): the 16 newly-enumerated paths (mongo-backend siblings, more
 stored sources) are plausible-looking and pushed vuln routes out of the
 top 12. Coverage and ranking pull in opposite directions: every path the
@@ -325,7 +328,7 @@ session.request()` with the guard's source visible in state.
 
 ```
 fixture     strategy   n   TP   FP    route-aware note
-cdio-lfr    jev        5   0    12    CVE path ranked ~19-20 every rep
+cdio-lfr    jev        5   0    12    self.watch variant absent from pool
 cdio-lfr    baseline   2   1    11    enum-order luck again
 cdio-lfr    static     2   0    12
 alerta      jev        3   2    10    87-path pool keeps diluting
@@ -334,14 +337,17 @@ whoogle     jev        3   3    3
 
 Two honest reads:
 
-1. **Provenance moved the label, not the ordering.** The CVE path rose
-   from ~46 (HTTP-entry variant) to ~19-20 of 118, still 7-8 ranks short
-   of budget. Provenance lifted the *entire stored class* — the top 12
-   is now dominated by `user-stored:` paths like `add_watch ->
+1. **Provenance moved the label, not the ordering.** In a manual
+   full-pool pass (118 paths) the CVE variant scored ~19-20, still
+   short of budget. In the actual runs the `self.watch` variant never
+   enumerated at all — `ScanConfig.max_paths=500` overrode the
+   generator's raised cap, so the run pool had 73 paths and the
+   self.watch source never reached it (see stub4 for the fix and the
+   measured effect). Provenance lifted the *entire stored class*: the
+   top 12 was dominated by `user-stored:` paths like `add_watch ->
    requests.request` (the URL-validation fetch, itself a suspicious
-   user-controlled fetch). The CVE path competes with siblings that
-   look just as attacker-controlled; within-class discrimination is
-   still missing.
+   user-controlled fetch). Within-class discrimination was still
+   missing.
 
 2. **The miss is ranker-side, confirmed.** Handed the path directly,
    devin-cli timed out at 600s (uncertain) then CONFIRMED on retry
@@ -351,6 +357,80 @@ Two honest reads:
    investigator can verify this path; it just costs ~10min on a
    313-file repo. Budget spent on 12 wrong picks means the CVE never
    reaches the investigator.
+
+### sink_reach dimension + post-sink state (phase stub4)
+
+The stub3 read blamed missing within-class discrimination: the CVE
+path scores like its stored-fetch siblings because "fetch a stored
+URL" is the feature. The `sink_reach` dimension (weight 0.15) asks a
+different question: what does the sink's return value let the
+attacker reach, once the shown checks fail? To make the question
+answerable, `path_state` now appends `post_sink` lines: the later
+lines in the enclosing body that consume the sink's result. On the
+CVE path this surfaces `self.content = r.text` and
+`self.raw_content = r.content` ~40 lines past the sink, previously
+invisible.
+
+**Direct probe** (CVE path vs its top-3 stored-class siblings,
+scored twice):
+
+```
+rep 0:  CVE 0.78 | add_watch 0.69 | snapshot-open 0.67 | add_watch2 0.64
+rep 1:  CVE 0.78 | add_watch 0.73 | snapshot-open 0.71 | add_watch2 0.65
+```
+
+Consistent direction but a 0.05-0.13 margin, under the 0.2 bar for
+clean separation. Per the plan's decision rule an ambiguous gap goes
+to the sweep.
+
+**A measurement bug surfaced first.** The stub4 sweep initially ran
+the same miss as stub3 (0/5), and a full-pool rank pass put the CVE
+at rank 6 of 118 — a contradiction that exposed it: benchmark runs
+generated 73 paths, not 118. `ScanConfig.max_paths=500` overrode the
+generator's raised cap, so every run since stub2 truncated the pool
+and the `self.watch` variant never enumerated in ANY run. The
+"rank ~14/19-20" figures in earlier sections were manual passes on
+a pool the runs never saw. Fixed the config default and re-ran the
+whole phase.
+
+Route-aware results (stub agent, 12 picks/118 paths, jev_fail=0):
+
+```
+fixture    strategy   n   TP   FP    note
+cdio-lfr   jev        5   1    11    CVE picked 5/5, positions 10-12 of 12
+cdio-lfr   static     1   0    12
+cdio-lfr   baseline   1   1    8     stored-source sibling by enum order
+alerta     jev        3   1    11    87-path pool; was 2 under stub3's 75
+whoogle    jev        3   2-3  3-4   element/window still 0/3 picked
+```
+
+Three honest reads:
+
+1. **The win is mostly coverage, not the new dimension.** An ablation
+   scoring the same 118-path pool with the `sink_reach` weight zeroed
+   ranks the CVE 9-13 across three draws, vs 6-11 with it active.
+   The dimension contributes a small consistent nudge (matching the
+   probe's direction) but the path straddles the budget line either
+   way; the 0/5 -> 5/5 reversal comes from the path entering the
+   pool at all. In-run it lands at positions 10-12, the boundary.
+
+2. **It found the real path, not a shortcut.** Picks are the
+   canonical `user-stored:self.watch -> call_browser() -> ... ->
+   session.request` chain, and the stub confirmed all five. The
+   baseline's TP is a legitimate stored-source sibling early in
+   enumeration order, not a scoring success.
+
+3. **Regressions.** Whoogle element/window picks stayed 0/3 (TP
+   stayed 2-3 via other real vulns, so the TP count hides the pick-
+   level miss, exactly the confound the plan flagged). Alerta fell
+   to 1 TP/run, but its pool grew 75 -> 87 under the same cap fix,
+   so dilution, not the dimension, is the likelier cause.
+
+Net: Jev now surfaces the cdio CVE inside budget every rep, but the
+credit splits between finally enumerating the path and a marginal
+scoring nudge. Within-class discrimination is still the open
+problem: `sink_reach` separates the CVE from siblings by ~0.05, not
+the ~0.2+ a robust pick would need.
 
 ## Conclusions
 
@@ -380,11 +460,12 @@ Two honest reads:
    all six traps high. Defensible: the graph shows no guard, so they ARE
    suspicious; the investigator layer is where they should die. (b) SSRF on
    vuln-heap straddled the budget cut across runs. (c) The earlier catastrophic
-   miss was an adapter normalization bug, not the model. (d) On cdio it ranked
-   the real CVE ~14/110 in every rep — not a scoring error so much as a
-   semantic one: a stored URL that the app exists to fetch scores like the
-   feature it is. The weak `^file:/` check registered (gb=0.62) but cannot
-   carry a path whose other dimensions read "intended".
+   miss was an adapter normalization bug, not the model. (d) On cdio the
+   CVE path was not even in the run pool until stub4 (the max_paths
+   override bug); once enumerable it ranks ~6-13 of 118, straddling the
+   pick line, and was picked 5/5. The weak `^file:/` check registers
+   (gb=0.62) but the residual problem is that its stored-fetch siblings
+   score within ~0.05 of it.
 
 5. **What is the biggest bottleneck?** Still the investigator, but now
    precisely characterized: stub falsifies real vulns it cannot reason
@@ -400,16 +481,21 @@ Two honest reads:
    fetch vulns are the hardest class and NO ranker found it. (c) Done:
    store-write provenance made the source label truthful
    (`user-stored:self.watch`) and lifted the whole stored class, but the
-   CVE path still sits ~19/118 — the missing capability is now
+   CVE path still scored ~19/118 in manual passes (and, it turned out,
+   was absent from run pools entirely) — the missing capability is now
    discrimination *within* a uniformly-plausible class, not source
    identification. Devin confirmed the path when handed it (~10min on
    313 files), so the residual gap is ranking, not investigation.
-   (d) Next: within-class discrimination — the CVE path differs from its
-   `add_watch` siblings mainly in *sink semantics* (arbitrary file read
-   vs validation fetch) and guard content; a "what can this sink
-   actually reach" question or deeper guard-vs-sink reasoning is the
-   remaining lever. (e) Larger devin ablation (n>=5) once per-run cost
-   is tolerable.
+   (d) Done: `sink_reach` plus post-sink state asked what the sink's
+   result lets the attacker reach. The CVE now gets picked 5/5, but
+   mostly because a max_paths override bug had kept it out of every
+   run pool; zeroing the dimension's weight still ranks it ~9-13, so
+   the new signal is a nudge, not the separation the class needs.
+   The plan's stop condition holds: record and stop, no further
+   dimension iteration in this change. (e) Next levers: sharper
+   within-class signals (scheme/host reach of the fetch target,
+   guard-content reasoning), and a larger devin ablation (n>=5) once
+   per-run cost is tolerable.
 
 7. **Methodological note.** "Verified TP" confounds ranker and investigator
    quality: the gb reruns have identical Jev picks under stub and devin, but
@@ -427,7 +513,15 @@ Two honest reads:
 - The stub agent is deterministic and much weaker than a real coding agent,
   so strategy rows share its blind spots (e.g. the vuln-fetch miss).
 - Jev scoring is stochastic; single-run numbers have visible variance (on
-  corpus-a it was stable, TP 6-7; on vuln-heap it swung a marginal path).
+  corpus-a it was stable, TP 6-7; on vuln-heap it swung a marginal path;
+  on cdio the CVE draws at ranks 6-13, straddling the 12-pick line, so
+  its 5/5 pick rate is a boundary result, not a robust margin).
+- Every benchmark run before stub4 silently used `max_paths=500`
+  (ScanConfig overrode the generator's raised cap), so stored-source
+  paths, including the cdio CVE variant, were absent from those pools.
+  Rank claims in the stub2/stub3 sections were measured manually on the
+  full pool; in-run comparisons across phases now mix pool sizes
+  (cdio 73 -> 118, alerta 75 -> 87).
 - The generated corpus places easy vulns on early routes, which inflates the
   flat-ordering baseline's apparent precision; treat baseline as a floor.
 - Static proof cannot verify that a *dynamic* guard is effective, and cannot

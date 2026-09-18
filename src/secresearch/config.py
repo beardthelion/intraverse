@@ -17,6 +17,7 @@ DEFAULT_WEIGHTS = {
     "insufficient_validation": 0.06,
     "guard_bypassable": 0.15,
     "unintended_use": 0.15,
+    "sink_reach": 0.15,
     "state_manipulation": 0.02,
 }
 
@@ -28,7 +29,7 @@ class ScanConfig:
     language: str = "python"
     max_iterations: int = 40
     select_per_iteration: int = 1
-    max_paths: int = 500
+    max_paths: int = 20000
     max_path_depth: int = 10
     budget_jev_calls: int = 2000
     budget_agent_calls: int = 60
