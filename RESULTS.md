@@ -303,6 +303,55 @@ stored sources) are plausible-looking and pushed vuln routes out of the
 top 12. Coverage and ranking pull in opposite directions: every path the
 analyzer recovers is one more competitor for the budget.
 
+### Store-write provenance (phase stub3)
+
+The stub2 read blamed missing *state*, not scoring: "the stored URL is
+user-written" was invisible to Jev. This round adds provenance tracking:
+
+- Tainted writes into store-rooted objects (`self.__data[uuid] =
+  new_watch`, `datastore.add_watch(url=...)`, `s.update(tainted)`)
+  mark the root user-written. Stored reads of that root — or of attrs
+  assigned from it (`self.watch = self.datastore...`) — emit
+  `user-stored:self.x` labels, so the path's source reads as
+  attacker-written, not feature-internal.
+- Container-shaped writes (`self.x[k] = v`, `self.x.update(v)` on
+  store-named attrs) mark the attr stored even without a store-shaped
+  RHS; `ast.Dict` now carries taint (`row = {'url': self.path}`).
+
+Path counts grew everywhere (cdio 110->118, alerta 78->87, whoogle
+11->14; the Dict fix alone added paths). On cdio the CVE path now
+enumerates as `user-stored:self.watch -> call_browser() -> ... ->
+session.request()` with the guard's source visible in state.
+
+```
+fixture     strategy   n   TP   FP    route-aware note
+cdio-lfr    jev        5   0    12    CVE path ranked ~19-20 every rep
+cdio-lfr    baseline   2   1    11    enum-order luck again
+cdio-lfr    static     2   0    12
+alerta      jev        3   2    10    87-path pool keeps diluting
+whoogle     jev        3   3    3
+```
+
+Two honest reads:
+
+1. **Provenance moved the label, not the ordering.** The CVE path rose
+   from ~46 (HTTP-entry variant) to ~19-20 of 118, still 7-8 ranks short
+   of budget. Provenance lifted the *entire stored class* — the top 12
+   is now dominated by `user-stored:` paths like `add_watch ->
+   requests.request` (the URL-validation fetch, itself a suspicious
+   user-controlled fetch). The CVE path competes with siblings that
+   look just as attacker-controlled; within-class discrimination is
+   still missing.
+
+2. **The miss is ranker-side, confirmed.** Handed the path directly,
+   devin-cli timed out at 600s (uncertain) then CONFIRMED on retry
+   (~600s), correctly identifying the bypass: `re.search(r'^file:/')`
+   misses `file:path` (no slash) and `file:\path` (backslash), and
+   browser fetchers navigate the URL with no scheme check at all. The
+   investigator can verify this path; it just costs ~10min on a
+   313-file repo. Budget spent on 12 wrong picks means the CVE never
+   reaches the investigator.
+
 ## Conclusions
 
 1. **Did Jev improve path selection?** Yes, measurably, once candidates
@@ -348,13 +397,19 @@ analyzer recovers is one more competitor for the budget.
    moved the whoogle CVE inside budget (4/5 reps) at a small cost on
    alerta. (b) Done: a mid-size sparse-CVE repo (cdio) showed the analyzer
    was the bottleneck, then showed the ranker is too — stored-intended-
-   fetch vulns are the hardest class and NO ranker found it. (c) The next
-   discriminating signal is probably not another score but better
-   evidence in the state: Jev scored the cdio path honestly given that
-   "fetch the stored URL" looks benign; the missing information is the
-   *content* of the weak check vs the fetch semantics, which argues for
-   deeper guard-context extraction rather than new dimensions. (d) Larger
-   devin ablation (n>=5) once per-run cost is tolerable.
+   fetch vulns are the hardest class and NO ranker found it. (c) Done:
+   store-write provenance made the source label truthful
+   (`user-stored:self.watch`) and lifted the whole stored class, but the
+   CVE path still sits ~19/118 — the missing capability is now
+   discrimination *within* a uniformly-plausible class, not source
+   identification. Devin confirmed the path when handed it (~10min on
+   313 files), so the residual gap is ranking, not investigation.
+   (d) Next: within-class discrimination — the CVE path differs from its
+   `add_watch` siblings mainly in *sink semantics* (arbitrary file read
+   vs validation fetch) and guard content; a "what can this sink
+   actually reach" question or deeper guard-vs-sink reasoning is the
+   remaining lever. (e) Larger devin ablation (n>=5) once per-run cost
+   is tolerable.
 
 7. **Methodological note.** "Verified TP" confounds ranker and investigator
    quality: the gb reruns have identical Jev picks under stub and devin, but
@@ -387,6 +442,11 @@ analyzer recovers is one more competitor for the budget.
   (`open(request.args['f'])` with no assignment) produces a sink site but
   no source node, so no path. Stored-taint covers `self.<attr>` reads but
   not module-level store handles (e.g. `cache.get(k)`).
+- Store-shape detection is name-based: attrs matching
+  `datastore|store|db|cache|backend|*data` count as stores, so a
+  `self.metadata` field assigned non-store data still marks the class
+  stored. The user-written upgrade requires a *tainted* write, which
+  limits false upgrades, but the base stored label can still over-fire.
 - The `request` short-name sink matches any `x.request(...)`; plausible
   FPs on non-HTTP receivers.
 - Baseline's flat ordering is enumeration order, which is roughly source

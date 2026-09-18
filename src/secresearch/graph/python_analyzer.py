@@ -51,6 +51,14 @@ SOURCE_NAMES = {"argv"}
 # self.<attr> reads that are treated as stored user input (second-order
 # taint: the data was supplied by a user earlier and read back now).
 STORED_SELF_ATTRS = {"datastore", "store", "db", "cache", "backend"}
+# Attribute/name roots that look like persistent containers; used both for
+# "this self.<attr> is a store" and "this write goes into a store".
+STORE_ROOT_RE = re.compile(
+    r"^_*(datastore|store|db|cache|backend|.*_?data)s?_*$", re.IGNORECASE)
+# Method names that write into a store: s.update(x), db.add_watch(u), ...
+STORE_WRITE_RE = re.compile(
+    r"^(update|put|set|save|add|insert|append|store|create|delete|remove|clear|write)",
+    re.IGNORECASE)
 
 SINK_SPECS: dict[str, tuple[NodeType, str]] = {
     "os.system": (NodeType.PROCESS_EXEC, "command_execution"),
@@ -187,6 +195,8 @@ class PythonAnalyzer(CodeGraphProvider):
         self._class_bases: dict[str, set[str]] = {}
         self._self_types: dict[str, dict[str, str]] = {}
         self._stored_attrs: dict[str, set[str]] = {}
+        self._stored_backing: dict[str, dict[str, str]] = {}
+        self._user_written: set[str] = set()
         skip_dirs = {"test", "tests", "testing", "venv", ".venv",
                      "node_modules", "__pycache__", "docs", "examples"}
         for py in sorted(root.rglob("*.py")):
@@ -210,6 +220,12 @@ class PythonAnalyzer(CodeGraphProvider):
             if info.tainted_params:
                 self._analyze_function(info, functions, methods_by_name)
         self._propagate_taint(functions)
+        if self._user_written:
+            # Store writes seen during analysis upgrade stored-read labels to
+            # user-stored provenance; re-analyze so it reaches sources/sinks.
+            for info in functions.values():
+                self._analyze_function(info, functions, methods_by_name)
+            self._propagate_taint(functions)
         self._emit_graph(graph, functions)
         return graph
 
@@ -298,36 +314,74 @@ class PythonAnalyzer(CodeGraphProvider):
             if not cls:
                 continue
             for node in ast.walk(info.node):
-                if not isinstance(node, ast.Assign):
-                    continue
-                for t in node.targets:
-                    if not (isinstance(t, ast.Attribute)
-                            and isinstance(t.value, ast.Name)
-                            and t.value.id == "self"):
-                        continue
-                    # declared type: self.fetcher = Fetcher(); first wins so
-                    # __init__ declarations beat later concrete reassignments
-                    if (isinstance(node.value, ast.Call)
-                            and isinstance(node.value.func, ast.Name)):
-                        self._self_types.setdefault(cls, {}).setdefault(
-                            t.attr, node.value.func.id)
-                    elif isinstance(node.value, ast.Name):
-                        self._self_types.setdefault(cls, {}).setdefault(
-                            t.attr, node.value.id)
-                    # stored backing: any name/attribute segment that looks
-                    # like a persistent store
-                    for sub in ast.walk(node.value):
-                        if isinstance(sub, (ast.Name, ast.Attribute)):
-                            parts = _dotted(sub).split(".")
-                            if parts and parts[0] == "self":
-                                parts = parts[1:]
-                            if parts and parts[0] in STORED_SELF_ATTRS:
-                                self._stored_attrs.setdefault(cls, set()).add(t.attr)
-                                break
+                if isinstance(node, ast.Assign):
+                    for t in node.targets:
+                        # container-shaped writes mark the attr as a store:
+                        # self.__data['watching'][uuid] = new_watch
+                        root = self._store_root_of(t)
+                        if root:
+                            self._stored_attrs.setdefault(cls, set()).add(root)
+                        if not (isinstance(t, ast.Attribute)
+                                and isinstance(t.value, ast.Name)
+                                and t.value.id == "self"):
+                            continue
+                        # declared type: self.fetcher = Fetcher(); first wins
+                        # so __init__ declarations beat later reassignments
+                        if (isinstance(node.value, ast.Call)
+                                and isinstance(node.value.func, ast.Name)):
+                            self._self_types.setdefault(cls, {}).setdefault(
+                                t.attr, node.value.func.id)
+                        elif isinstance(node.value, ast.Name):
+                            self._self_types.setdefault(cls, {}).setdefault(
+                                t.attr, node.value.id)
+                        # stored backing: a name/attribute segment that looks
+                        # like a persistent store; remember the backing root
+                        for sub in ast.walk(node.value):
+                            if isinstance(sub, (ast.Name, ast.Attribute)):
+                                parts = _dotted(sub).split(".")
+                                if parts and parts[0] == "self":
+                                    parts = parts[1:]
+                                if parts and (parts[0] in STORED_SELF_ATTRS
+                                              or STORE_ROOT_RE.match(parts[0])):
+                                    self._stored_attrs.setdefault(cls, set()).add(t.attr)
+                                    self._stored_backing.setdefault(cls, {})[t.attr] = parts[0]
+                                    break
+                elif (isinstance(node, ast.Call)
+                        and isinstance(node.func, ast.Attribute)
+                        and STORE_WRITE_RE.match(node.func.attr)):
+                    # store-rooted write methods: s.update(x), db.add_watch(u)
+                    root = self._store_root_of(node.func.value)
+                    if root:
+                        self._stored_attrs.setdefault(cls, set()).add(root)
+
+    @staticmethod
+    def _store_root_of(node: ast.expr) -> str | None:
+        """The store-shaped root attr/name of a write target or receiver."""
+        while isinstance(node, ast.Subscript):
+            node = node.value
+        if isinstance(node, ast.Attribute):
+            parts = _dotted(node).split(".")
+            if parts[0] == "self" and len(parts) > 1 \
+                    and STORE_ROOT_RE.match(parts[1]):
+                return parts[1]
+            if STORE_ROOT_RE.match(parts[0]):
+                return parts[0]
+        elif isinstance(node, ast.Name) and STORE_ROOT_RE.match(node.id):
+            return node.id
+        return None
 
     def _stored_names(self, info: _FunctionInfo) -> set[str]:
         cls = info.qualname.rsplit(".", 1)[0] if "." in info.qualname else ""
         return self._stored_attrs.get(cls, set()) | STORED_SELF_ATTRS
+
+    def _stored_label(self, info: _FunctionInfo, first: str) -> str:
+        """Source label for a stored read, upgraded when the store's backing
+        root received user input (self.watch <- datastore <- request.form)."""
+        cls = info.qualname.rsplit(".", 1)[0] if "." in info.qualname else ""
+        backing = self._stored_backing.get(cls, {}).get(first, first)
+        if first in self._user_written or backing in self._user_written:
+            return f"user-stored:self.{first}"
+        return f"self.{first}"
 
     def _is_abstract(self, info: _FunctionInfo) -> bool:
         """Body is only docstring/pass/raise NotImplementedError/ellipsis."""
@@ -434,7 +488,7 @@ class PythonAnalyzer(CodeGraphProvider):
                 if root == "self" and attr.split(".")[0] in HTTP_SELF_SOURCES:
                     return {f"self.{attr}"}
                 if root == "self" and attr.split(".")[0] in self._stored_names(info):
-                    return {f"self.{attr.split('.')[0]}"}
+                    return {self._stored_label(info, attr.split(".")[0])}
                 if root == "sys" and attr.split(".")[0] in SOURCE_NAMES:
                     return {"sys.argv"}
                 if root == "os" and attr.split(".")[0] == "environ":
@@ -476,6 +530,12 @@ class PythonAnalyzer(CodeGraphProvider):
                 for x in e.elts:
                     labels |= expr_taint(x)
                 return labels
+            if isinstance(e, ast.Dict):
+                labels = set()
+                for v in e.values:
+                    if v is not None:
+                        labels |= expr_taint(v)
+                return labels
             if isinstance(e, ast.Subscript):
                 return expr_taint(e.value)
             if isinstance(e, ast.IfExp):
@@ -504,6 +564,13 @@ class PythonAnalyzer(CodeGraphProvider):
                     for kw in child.keywords:
                         taint_labels |= expr_taint(kw.value)
                     if taint_labels:
+                        # tainted values written into a store make the store
+                        # user-controlled: s['k']=tainted, db.add_watch(url)
+                        if isinstance(child.func, ast.Attribute) \
+                                and STORE_WRITE_RE.match(short):
+                            wroot = self._store_root_of(child.func.value)
+                            if wroot:
+                                self._user_written.add(wroot)
                         sink_key = self._sink_key(cname, short)
                         if sink_key:
                             ntype, vuln = SINK_SPECS[sink_key]
@@ -539,6 +606,10 @@ class PythonAnalyzer(CodeGraphProvider):
                             info.secret_names.add(t.id)
                     labels |= expr_taint(child.value)
                     if labels:
+                        for t in child.targets:
+                            wroot = self._store_root_of(t)
+                            if wroot:
+                                self._user_written.add(wroot)
                         for t in child.targets:
                             if isinstance(t, ast.Name):
                                 tainted.setdefault(t.id, set()).update(labels)
@@ -647,7 +718,7 @@ class PythonAnalyzer(CodeGraphProvider):
                 else:
                     root, _, attr = base.partition(".")
                     if root == "self" and attr.split(".")[0] in self._stored_names(info):
-                        found.add(f"self.{attr.split('.')[0]}")
+                        found.add(self._stored_label(info, attr.split(".")[0]))
             for c in ast.iter_child_nodes(n):
                 if isinstance(c, ast.expr):
                     walk(c)

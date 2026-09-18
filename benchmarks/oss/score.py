@@ -41,10 +41,13 @@ ALERTA_VULN_ROUTES = {
 ALERTA_EXECUTE_LINES = {1583, 1593, 1605, 1614, 1624, 1640, 1650}
 
 # cdio: GHSA-j5vv-6wjg-cfr8 — stored watch.url reaches session.request via
-# the bypassable file:/ check; only the watch-start fetch path is the CVE
+# the bypassable file:/ check; only the watch-start fetch path is the CVE.
+# Entries include the user-stored:* provenance labels emitted when the
+# analyzer sees tainted writes into the same store.
 CDIO_TRUTH = {
     "outbound_request": ("changedetectionio/content_fetchers/requests.py", 56,
-                         {"/<string:uuid>/start", "self.watch", "self.datastore"}),
+                         {"/<string:uuid>/start", "self.watch", "self.datastore",
+                          "user-stored:self.watch", "user-stored:self.datastore"}),
 }
 
 LOC = re.compile(r"@(\S+):(\d+)")

@@ -182,6 +182,73 @@ class TestStoredTaint(unittest.TestCase):
         self.assertTrue(opens)
         self.assertTrue(checker.path_has_sanitizer(opens[0]))
 
+    def test_user_written_store_labels_provenance(self):
+        # A tainted write into a store root upgrades reads of that root (and
+        # attrs backed by it) to user-stored provenance.
+        graph, paths = analyze_src({
+            "app.py": (
+                "from http.server import BaseHTTPRequestHandler\n"
+                "class H(BaseHTTPRequestHandler):\n"
+                "    def do_GET(self):\n"
+                "        url = self.path\n"
+                "        datastore.add_watch(url=url)\n"
+            ),
+            "worker.py": (
+                "class W:\n"
+                "    def __init__(self):\n"
+                "        self.watch = self.datastore.data['w'].get(1)\n"
+                "    def go(self):\n"
+                "        u = self.watch.link\n"
+                "        open(u)\n"
+            ),
+        })
+        self.assertTrue(
+            any("user-stored:self.watch" in p.label for p in paths))
+
+    def test_container_write_marks_attr_stored(self):
+        # self.__data[k] = v marks __data as a store; later reads are sources.
+        graph, paths = analyze_src({
+            "a.py": (
+                "class S:\n"
+                "    def put(self, k, v):\n"
+                "        self.__data[k] = v\n"
+                "    def get(self, k):\n"
+                "        row = self.__data[k]\n"
+                "        open(row['url'])\n"
+            ),
+        })
+        self.assertTrue(any("self.__data" in p.label for p in paths))
+
+    def test_clean_store_reads_stay_plain(self):
+        # Store-backed reads without any tainted write keep the plain label.
+        graph, paths = analyze_src({
+            "a.py": (
+                "class P:\n"
+                "    def __init__(self):\n"
+                "        self.watch = self.datastore.data['w'].get(1)\n"
+                "    def go(self):\n"
+                "        url = self.watch.link\n"
+                "        open(url)\n"
+            ),
+        })
+        labels = [p.label for p in paths]
+        self.assertTrue(any("self.watch" in l for l in labels))
+        self.assertFalse(any("user-stored" in l for l in labels))
+
+    def test_dict_literal_carries_taint(self):
+        graph, paths = analyze_src({
+            "a.py": (
+                "from http.server import BaseHTTPRequestHandler\n"
+                "class H(BaseHTTPRequestHandler):\n"
+                "    def do_GET(self):\n"
+                "        row = {'url': self.path}\n"
+                "        open(row['url'])\n"
+            ),
+        })
+        self.assertTrue(
+            any("self.path" in p.label and "open()" in p.label
+                for p in paths))
+
 
 class TestGuards(unittest.TestCase):
     def test_same_line_sanitizer_dominates(self):

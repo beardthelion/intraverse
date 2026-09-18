@@ -49,7 +49,7 @@ def append(row: dict) -> None:
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("phase", choices=["stub", "devin", "stub-uu", "stub2"])
+    ap.add_argument("phase", choices=["stub", "devin", "stub-uu", "stub2", "stub3"])
     args = ap.parse_args()
 
     # per-fixture budgets: paths must outnumber picks for ranking to matter
@@ -67,7 +67,19 @@ def main() -> None:
               f"FP={m['false_positives']} missed={m['missed']} "
               f"jev_fail={m.get('jev_failures', 0)}", flush=True)
 
-    if args.phase == "stub2":
+    if args.phase == "stub3":
+        # post-provenance analyzer: user-stored:* labels on store reads whose
+        # backing root received tainted writes; ast.Dict taint added paths to
+        # every fixture (cdio 110->118, alerta 78->87, whoogle 11->14).
+        for rep in range(5):
+            go("cdio-lfr", "jev", "stub", 0, rep)
+        for rep in range(2):
+            go("cdio-lfr", "static", "stub", 0, rep)
+            go("cdio-lfr", "baseline", "stub", 0, rep)
+        for rep in range(3):
+            go("alerta-sqli", "jev", "stub", 0, rep)
+            go("whoogle-ssrf", "jev", "stub", 0, rep)
+    elif args.phase == "stub2":
         # post-stored-taint analyzer: cdio is new; alerta grew 62->78 paths
         # after the enumeration-cap fix so its old rows are stale. whoogle
         # and corpus-a are unchanged (no classes/stores, under old cap).
