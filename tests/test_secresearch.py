@@ -495,6 +495,31 @@ class TestSinkReach(unittest.TestCase):
         self.assertIn("self.body = r.text",
                       state["hops"][-1].get("post_sink", ""))
 
+    def test_state_post_sink_tracks_attr_targets(self):
+        # `self.r = s.request(...)` assigns the result to instance state;
+        # the tracker must follow attribute targets, not just bare names
+        from secresearch.decision.base import path_state
+        graph, paths = analyze_src({
+            "a.py": (
+                "import requests\n"
+                "from http.server import BaseHTTPRequestHandler\n"
+                "class H(BaseHTTPRequestHandler):\n"
+                "    def do_GET(self):\n"
+                "        url = self.path\n"
+                "        s = requests.Session()\n"
+                "        self.r = s.request(method='GET', url=url)\n"
+                "        self.body = self.r.text\n"
+            ),
+        })
+        checker = InvariantChecker(graph)
+        sinks = [p for p in paths
+                 if graph.nodes[p.nodes[-1]].attrs.get("vuln")
+                 == "outbound_request"]
+        self.assertTrue(sinks)
+        state = path_state(sinks[0], graph, checker)
+        self.assertIn("self.body = self.r.text",
+                      state["hops"][-1].get("post_sink", ""))
+
     def test_state_post_sink_empty_when_result_unused(self):
         from secresearch.decision.base import path_state
         graph, paths = analyze_src({

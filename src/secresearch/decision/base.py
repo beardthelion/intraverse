@@ -15,7 +15,20 @@ from ..graph.code_graph import CodeGraph
 from ..graph.invariants import InvariantChecker
 
 
+def _boundary(target: str) -> "re.Pattern[str]":
+    pat = re.escape(target)
+    if target[0].isalnum() or target[0] == "_":
+        pat = r"\b" + pat
+    if target[-1].isalnum() or target[-1] == "_":
+        pat += r"\b"
+    return re.compile(pat)
+
+
+_ASSIGN = re.compile(r"\s*([\w.\[\]'\"]+?)\s*=[^=]")
+
+
 def _post_sink_lines(root: Path, sink_hop: dict, graph: CodeGraph,
+                     src: list[str] | None = None,
                      max_lines: int = 16) -> str:
     """Lines in the sink's enclosing function that consume the sink call's
     return value: where the fetched/decoded result actually goes.
@@ -24,43 +37,41 @@ def _post_sink_lines(root: Path, sink_hop: dict, graph: CodeGraph,
     consequence: ``self.content = r.text`` can sit dozens of lines after
     ``r = session.request(...)``, outside the hop excerpt window.
     """
-    fn = None
-    for t in (NodeType.FUNCTION, NodeType.HTTP_ENTRY, NodeType.CLI_ENTRY,
-              NodeType.EVENT_CONSUMER):
-        for f in graph.nodes_of_type(t):
-            loc = f.location
-            end = loc.line_end or loc.line_start
-            if loc.file == sink_hop["file"] \
-                    and loc.line_start <= sink_hop["line"] <= end:
-                if fn is None or end - loc.line_start < \
-                        (fn.location.line_end or fn.location.line_start) \
-                        - fn.location.line_start:
-                    fn = f
+    fn = min(
+        (f for f in graph.nodes_of_type(
+            NodeType.FUNCTION, NodeType.HTTP_ENTRY, NodeType.CLI_ENTRY,
+            NodeType.EVENT_CONSUMER)
+         if f.location.file == sink_hop["file"]
+         and f.location.line_start <= sink_hop["line"]
+         <= (f.location.line_end or f.location.line_start)),
+        key=lambda f: (f.location.line_end or f.location.line_start)
+                      - f.location.line_start,
+        default=None)
     if fn is None:
         return ""
-    try:
-        src = (root / fn.location.file).read_text(
-            errors="replace").splitlines()
-    except OSError:
-        return ""
+    if src is None:
+        try:
+            src = (root / fn.location.file).read_text(
+                errors="replace").splitlines()
+        except OSError:
+            return ""
     call_line = src[sink_hop["line"] - 1] \
         if 0 < sink_hop["line"] <= len(src) else ""
-    m = re.match(r"\s*(\w+)\s*=[^=]", call_line)
+    m = _ASSIGN.match(call_line)
     if not m:
         return ""
-    tracked = {m.group(1)}
+    tracked = {m.group(1): _boundary(m.group(1))}
     out = []
     last = min(fn.location.line_end or sink_hop["line"], len(src))
     for lineno in range(sink_hop["line"] + 1, last + 1):
         line = src[lineno - 1]
-        if not any(re.search(rf"\b{v}\b", line) for v in tracked):
+        if not any(p.search(line) for p in tracked.values()):
             continue
-        # one level of propagation: `res = r.json()` also tracks `res`
-        am = re.match(r"\s*(\w+)\s*=[^=]", line)
-        if am and re.search(
-                rf"\b{'|'.join(re.escape(v) for v in tracked)}\b",
-                line.split("=", 1)[1]):
-            tracked.add(am.group(1))
+        # propagate through assignments: `res = r.json()` also tracks `res`
+        am = _ASSIGN.match(line)
+        if am and am.group(1) not in tracked and any(
+                p.search(line[am.end(1):]) for p in tracked.values()):
+            tracked[am.group(1)] = _boundary(am.group(1))
         out.append(f"{lineno}: {line.rstrip()}")
         if len(out) >= max_lines:
             break
@@ -77,17 +88,26 @@ def path_state(path: AttackPath, graph: CodeGraph, checker: InvariantChecker,
     feats = checker.features(path)
     hops = []
     root = Path(graph.root)
+    file_cache: dict[str, list[str] | None] = {}
+
+    def read_lines(rel: str) -> list[str] | None:
+        if rel not in file_cache:
+            try:
+                file_cache[rel] = (root / rel).read_text(
+                    errors="replace").splitlines()
+            except OSError:
+                file_cache[rel] = None
+        return file_cache[rel]
+
     node_ids = path.nodes[:max_hops]
     n_hops = len(feats["hops"])
     for i, h in enumerate(feats["hops"][:max_hops]):
         excerpt = ""
-        try:
-            src = (root / h["file"]).read_text(errors="replace").splitlines()
+        src = read_lines(h["file"])
+        if src:
             lo = max(0, h["line"] - 2)
             hi = min(len(src), h["line"] + excerpt_lines)
             excerpt = "\n".join(f"{i+1}: {src[i]}" for i in range(lo, hi))
-        except OSError:
-            pass
         hop = {**h, "code": excerpt}
         # Include the call-site line for the next hop so the model can see
         # which argument carried taint across the edge (e.g. send(base_url=q)
@@ -95,18 +115,13 @@ def path_state(path: AttackPath, graph: CodeGraph, checker: InvariantChecker,
         if i + 1 < len(node_ids):
             for e in graph.out_edges(node_ids[i], EdgeType.CALLS):
                 if e.dst == node_ids[i + 1]:
-                    try:
-                        csrc = (root / e.location.file).read_text(
-                            errors="replace").splitlines()
-                        ln = e.location.line_start - 1
+                    csrc = read_lines(e.location.file)
+                    ln = e.location.line_start - 1
+                    if csrc and 0 <= ln < len(csrc):
                         hop["call_site"] = (
                             f"{e.location.file}:{e.location.line_start}: "
                             f"{csrc[ln].strip()}")
-                    except (OSError, IndexError):
-                        pass
                     break
-        if i == n_hops - 1:
-            hop["post_sink"] = _post_sink_lines(root, h, graph)
         hops.append(hop)
     funcs = {
         n.attrs.get("qualname", n.label.rstrip("()")): n
@@ -120,13 +135,11 @@ def path_state(path: AttackPath, graph: CodeGraph, checker: InvariantChecker,
             continue
         seen_guard_locs.add(loc)
         excerpt = ""
-        try:
-            src = (root / g.location.file).read_text(errors="replace").splitlines()
+        gsrc = read_lines(g.location.file)
+        if gsrc:
             lo = max(0, g.location.line_start - 2)
-            hi = min(len(src), g.location.line_start + excerpt_lines)
-            excerpt = "\n".join(f"{i+1}: {src[i]}" for i in range(lo, hi))
-        except OSError:
-            pass
+            hi = min(len(gsrc), g.location.line_start + excerpt_lines)
+            excerpt = "\n".join(f"{i+1}: {gsrc[i]}" for i in range(lo, hi))
         guard = {
             "call": g.attrs.get("call", g.label),
             "file": g.location.file,
@@ -137,31 +150,34 @@ def path_state(path: AttackPath, graph: CodeGraph, checker: InvariantChecker,
         # the actual check, not just the call site. Includes module-level
         # constants the body references (allowlists, blocklists).
         fn = funcs.get(guard["call"])
-        if fn is not None:
-            try:
-                fsrc = (root / fn.location.file).read_text(
-                    errors="replace").splitlines()
-                body = fsrc[fn.location.line_start - 1:fn.location.line_end]
-                guard["definition"] = {
-                    "file": fn.location.file,
-                    "line": fn.location.line_start,
-                    "code": "\n".join(
-                        f"{fn.location.line_start + i}: {l}"
-                        for i, l in enumerate(body)),
-                }
-                body_names = set(re.findall(r"[A-Za-z_][A-Za-z0-9_]*",
-                                            "\n".join(body)))
-                consts = [
-                    f"{i+1}: {l}" for i, l in enumerate(fsrc)
-                    if l and not l[0].isspace()
-                    and re.match(r"[A-Za-z_][A-Za-z0-9_]*\s*=", l)
-                    and l.split("=")[0].strip() in body_names
-                ]
-                if consts:
-                    guard["definition"]["module_constants"] = "\n".join(consts)
-            except OSError:
-                pass
+        fsrc = read_lines(fn.location.file) if fn is not None else None
+        if fsrc:
+            body = fsrc[fn.location.line_start - 1:fn.location.line_end]
+            guard["definition"] = {
+                "file": fn.location.file,
+                "line": fn.location.line_start,
+                "code": "\n".join(
+                    f"{fn.location.line_start + i}: {l}"
+                    for i, l in enumerate(body)),
+            }
+            body_names = set(re.findall(r"[A-Za-z_][A-Za-z0-9_]*",
+                                        "\n".join(body)))
+            consts = [
+                f"{i+1}: {l}" for i, l in enumerate(fsrc)
+                if l and not l[0].isspace()
+                and re.match(r"[A-Za-z_][A-Za-z0-9_]*\s*=", l)
+                and l.split("=")[0].strip() in body_names
+            ]
+            if consts:
+                guard["definition"]["module_constants"] = "\n".join(consts)
         guards.append(guard)
+    post_sink = ""
+    if feats["hops"]:
+        sink_hop = feats["hops"][-1]
+        post_sink = _post_sink_lines(
+            root, sink_hop, graph, read_lines(sink_hop["file"]))
+    if n_hops <= max_hops and hops:
+        hops[-1]["post_sink"] = post_sink
     state = {
         "path_id": path.id,
         "hypothesis": path.hypothesis,
@@ -180,9 +196,8 @@ def path_state(path: AttackPath, graph: CodeGraph, checker: InvariantChecker,
         "hops": hops,
         "guards": guards,
     }
-    if n_hops > max_hops and feats["hops"]:
-        state["post_sink"] = _post_sink_lines(
-            root, feats["hops"][-1], graph)
+    if n_hops > max_hops:
+        state["post_sink"] = post_sink
     return state
 
 

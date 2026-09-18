@@ -198,11 +198,14 @@ class JevDecisionModel(DecisionModel):
             # degrade to a neutral score rather than aborting the run; the
             # failure counter keeps it visible in metrics
             stats.jev_failures += 1
+            guarded = (checker.path_has_sanitizer(path)
+                       or checker.path_has_authz(path))
             return PathScores(
                 attacker_control=0.5, trust_boundary_crossing=0.5,
                 authz_boundary_crossing=0.5, sensitive_sink=0.5,
                 insufficient_validation=0.5, invariant_violation=0.5,
-                research_value=0.5, sink_reach=0.5, estimated_cost=0.6,
+                research_value=0.5, guard_bypassable=0.5 if guarded else 0.0,
+                unintended_use=0.5, sink_reach=0.5, estimated_cost=0.6,
                 continue_exploration=0.5,
                 raw={"error": str(e)},
             )

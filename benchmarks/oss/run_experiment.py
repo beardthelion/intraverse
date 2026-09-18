@@ -32,7 +32,7 @@ def run(phase, fixture, strategy, agent, iters, seed, rep) -> dict:
     rep_dir = OUT / phase / f"rep{rep:02d}"
     report = run_benchmark(str(ROOT), strategies=[strategy], agent=agent,
                            max_iterations=iters, output_dir=str(rep_dir),
-                           fixture_filter=fixture)
+                           fixture_filter=fixture, seed=seed)
     row = dict(report.rows[0])
     row["rep"] = rep
     row["agent"] = agent
