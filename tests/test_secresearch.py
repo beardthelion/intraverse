@@ -682,6 +682,65 @@ class TestSinkReach(unittest.TestCase):
         self.assertEqual(out, "")
 
 
+class TestGuardCheck(unittest.TestCase):
+    def _guards(self, body: str):
+        from secresearch.decision.base import path_state
+        graph, paths = analyze_src({
+            "a.py": (
+                "import os, re, requests\n"
+                "from http.server import BaseHTTPRequestHandler\n"
+                "class H(BaseHTTPRequestHandler):\n"
+                "    def do_GET(self):\n"
+                "        url = self.path\n"
+                + body
+            ),
+        })
+        checker = InvariantChecker(graph)
+        sinks = [p for p in paths
+                 if graph.nodes[p.nodes[-1]].attrs.get("vuln")
+                 == "outbound_request"]
+        self.assertTrue(sinks)
+        return path_state(sinks[0], graph, checker)["guards"]
+
+    def test_denylist_pattern_check(self):
+        # the check's content must be visible: subject, pattern, and
+        # that a match denies the flow
+        guards = self._guards(
+            "        if re.search(r'^file:/', url):\n"
+            "            raise Exception('denied')\n"
+            "        s = requests.Session()\n"
+            "        s.request(method='GET', url=url)\n")
+        check = next(g["check"] for g in guards
+                     if g["call"] == "re.search")
+        self.assertEqual(check["pattern"], "'^file:/'")
+        self.assertEqual(check["subject"], "url")
+        self.assertEqual(check["kind"], "denylist")
+
+    def test_allowlist_prefix_check(self):
+        # `if not x.startswith(safe): raise` denies on non-match
+        guards = self._guards(
+            "        if not url.startswith('https://'):\n"
+            "            raise Exception('denied')\n"
+            "        s = requests.Session()\n"
+            "        s.request(method='GET', url=url)\n")
+        check = next(g["check"] for g in guards
+                     if "startswith" in g["call"])
+        self.assertEqual(check["kind"], "allowlist")
+        self.assertEqual(check["pattern"], "'https://'")
+
+    def test_env_gated_check(self):
+        guards = self._guards(
+            "        if os.getenv('ALLOW') and url.startswith('file://'):\n"
+            "            s = requests.Session()\n"
+            "            s.mount('file://', None)\n"
+            "        s2 = requests.Session()\n"
+            "        s2.request(method='GET', url=url)\n")
+        check = next(g["check"] for g in guards
+                     if "startswith" in g["call"])
+        self.assertIn("ALLOW", check["env"])
+        self.assertEqual(check["kind"], "gate")
+
+
 class TestConfigDefaults(unittest.TestCase):
     def test_max_paths_matches_generator_default(self):
         # benchmark runs truncated stored-source paths for two phases

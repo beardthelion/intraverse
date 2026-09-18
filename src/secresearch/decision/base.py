@@ -71,6 +71,99 @@ def _load_names(stmt: ast.stmt) -> list[tuple[int, str]]:
     return out
 
 
+def _fn_tree(graph: CodeGraph, file: str, line: int,
+             src: list[str] | None):
+    """(tree, line offset) of the parsed segment of the innermost function
+    containing ``file:line``, or (None, 0)."""
+    fn = min(
+        (f for f in graph.nodes_of_type(
+            NodeType.FUNCTION, NodeType.HTTP_ENTRY, NodeType.CLI_ENTRY,
+            NodeType.EVENT_CONSUMER)
+         if f.location.file == file
+         and f.location.line_start <= line
+         <= (f.location.line_end or f.location.line_start)),
+        key=lambda f: (f.location.line_end or f.location.line_start)
+                      - f.location.line_start,
+        default=None)
+    if fn is None or not src:
+        return None, 0
+    end = min(fn.location.line_end or line, len(src))
+    try:
+        tree = ast.parse(textwrap.dedent(
+            "\n".join(src[fn.location.line_start - 1:end])))
+    except SyntaxError:
+        return None, 0
+    return tree, fn.location.line_start - 1
+
+
+def _guard_check(guard, graph: CodeGraph,
+                 src: list[str] | None) -> dict | None:
+    """Structural reading of the check around a guard call: what is tested
+    against what pattern, under which env gates, and whether a match
+    denies the flow (denylist), a non-match denies it (allowlist), or the
+    check only gates a branch. The bypass question is blind without the
+    check's content, not just the call site."""
+    tree, off = _fn_tree(graph, guard.location.file,
+                         guard.location.line_start, src)
+    if tree is None:
+        return None
+    rel = guard.location.line_start - off
+    cond = min(
+        (n for n in ast.walk(tree)
+         if isinstance(n, (ast.If, ast.While, ast.Assert))
+         and n.test.lineno <= rel <= (n.test.end_lineno or n.test.lineno)),
+        key=lambda n: (n.end_lineno or n.lineno) - n.lineno,
+        default=None)
+    if cond is None:
+        return None
+    check: dict[str, Any] = {}
+    calls = [c for c in ast.walk(cond.test)
+             if isinstance(c, ast.Call) and c.lineno == rel]
+    call = calls[0] if calls else None
+    if call is not None:
+        full = _dotted(call.func)
+        check["call"] = full
+        name = full.rsplit(".", 1)[-1]
+        args = [ast.unparse(a) for a in call.args]
+        if name in {"search", "match", "fullmatch", "findall",
+                    "finditer"} and len(args) >= 2:
+            check["pattern"], check["subject"] = args[0], args[1]
+        elif name in {"startswith", "endswith"}:
+            check["subject"] = (
+                _dotted(call.func.value)
+                if isinstance(call.func, ast.Attribute) else None)
+            check["pattern"] = args[0] if args else None
+        elif args:
+            check["args"] = args[:3]
+    env = sorted({
+        c.args[0].value if c.args and isinstance(c.args[0], ast.Constant)
+        else None
+        for c in ast.walk(cond)
+        if isinstance(c, ast.Call)
+        and _dotted(c.func).endswith(("getenv", "environ.get"))})
+    env = [e for e in env if e]
+    if env:
+        check["env"] = env
+    negated = call is not None and any(
+        isinstance(n, ast.UnaryOp) and isinstance(n.op, ast.Not)
+        and any(x is call for x in ast.walk(n.operand))
+        for n in ast.walk(cond.test))
+    if isinstance(cond, ast.Assert):
+        # `assert check` denies when the check fails: an allow-list
+        negated, on_true = not negated, "deny"
+    else:
+        denies = any(isinstance(n, (ast.Raise, ast.Return))
+                     for s in cond.body for n in ast.walk(s))
+        on_true = "deny" if denies else "pass"
+    if call is not None:
+        check["negated"] = negated
+    check["on_true"] = on_true
+    check["kind"] = ("denylist" if on_true == "deny" and not negated
+                     else "allowlist" if on_true == "deny"
+                     else "gate")
+    return check or None
+
+
 def _post_sink_lines(sink_hop: dict, graph: CodeGraph,
                      src: list[str] | None,
                      max_lines: int = 16) -> str:
@@ -81,25 +174,9 @@ def _post_sink_lines(sink_hop: dict, graph: CodeGraph,
     consequence: ``self.content = r.text`` can sit dozens of lines after
     ``r = session.request(...)``, outside the hop excerpt window.
     """
-    fn = min(
-        (f for f in graph.nodes_of_type(
-            NodeType.FUNCTION, NodeType.HTTP_ENTRY, NodeType.CLI_ENTRY,
-            NodeType.EVENT_CONSUMER)
-         if f.location.file == sink_hop["file"]
-         and f.location.line_start <= sink_hop["line"]
-         <= (f.location.line_end or f.location.line_start)),
-        key=lambda f: (f.location.line_end or f.location.line_start)
-                      - f.location.line_start,
-        default=None)
-    if fn is None or not src:
+    tree, off = _fn_tree(graph, sink_hop["file"], sink_hop["line"], src)
+    if tree is None:
         return ""
-    end = min(fn.location.line_end or sink_hop["line"], len(src))
-    try:
-        tree = ast.parse(textwrap.dedent(
-            "\n".join(src[fn.location.line_start - 1:end])))
-    except SyntaxError:
-        return ""
-    off = fn.location.line_start - 1
     rel = sink_hop["line"] - off
     stmts = [n for n in ast.walk(tree)
              if isinstance(n, ast.stmt)
@@ -215,6 +292,9 @@ def path_state(path: AttackPath, graph: CodeGraph, checker: InvariantChecker,
             "line": g.location.line_start,
             "code": excerpt,
         }
+        check = _guard_check(g, graph, gsrc)
+        if check:
+            guard["check"] = check
         # Resolve the guard call to its in-repo definition so the model judges
         # the actual check, not just the call site. Includes module-level
         # constants the body references (allowlists, blocklists).

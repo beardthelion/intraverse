@@ -432,6 +432,35 @@ scoring nudge. Within-class discrimination is still the open
 problem: `sink_reach` separates the CVE from siblings by ~0.05, not
 the ~0.2+ a robust pick would need.
 
+### Guard-content check objects (post-stub4 lever)
+
+Within-class discrimination needs the check's *content*, not just its
+presence: `re.search(r'^file:/', url)` is a denylist whose pattern
+misses `file:path` and `file:\path` spellings, and the model could not
+see that structure from a raw excerpt alone. Guards now carry a
+`check` object extracted from the enclosing conditional's AST:
+`subject`, `pattern`, `negated`, `env` gates, and `kind`
+(denylist/allowlist/gate). The CVE path's guard reads
+`{pattern: '^file:/', subject: 'url.strip()', kind: 'denylist',
+env: ['ALLOW_FILE_URI']}`.
+
+Measured effect (manual full-pool rank passes, 118 paths):
+
+| signal | before | after |
+|--------|--------|-------|
+| CVE guard_bypassable | ~0.62 | 0.73-0.74 |
+| CVE rank (2 passes) | 6-11 | 12, 12 |
+
+The check object lifted the bypass score ~0.11 and stabilized the
+rank at the 12-pick boundary, but the separation problem is
+unchanged in kind: the 11 paths ahead are all plausible stored or
+form-controlled fetches (add_watch's pinned share endpoint, clone),
+and the strongest sibling still outranks the CVE (2.15-2.22 vs
+1.98-2.05). Guard content sharpened the signal; it did not produce
+robust within-class separation. The residual gap is reach semantics
+the model cannot see without evaluating which URI schemes or hosts
+a fetched attacker value can actually name.
+
 ## Conclusions
 
 1. **Did Jev improve path selection?** Yes, measurably, once candidates
@@ -492,10 +521,15 @@ the ~0.2+ a robust pick would need.
    run pool; zeroing the dimension's weight still ranks it ~9-13, so
    the new signal is a nudge, not the separation the class needs.
    The plan's stop condition holds: record and stop, no further
-   dimension iteration in this change. (e) Next levers: sharper
-   within-class signals (scheme/host reach of the fetch target,
-   guard-content reasoning), and a larger devin ablation (n>=5) once
-   per-run cost is tolerable.
+   dimension iteration in this change. (e) Done: guard-content check
+   objects gave `guard_bypassable` the check's structure (subject,
+   pattern, polarity, env gates). The CVE's bypass score rose ~0.11
+   and its rank stabilized at 12/118, but the top of the pool is
+   still uniformly-plausible stored fetches — the lever sharpened
+   the signal without producing robust separation. (f) Next levers:
+   reach semantics (which URI schemes/hosts the fetched value can
+   name given the check that passed), and a larger devin ablation
+   (n>=5) once per-run cost is tolerable.
 
 7. **Methodological note.** "Verified TP" confounds ranker and investigator
    quality: the gb reruns have identical Jev picks under stub and devin, but

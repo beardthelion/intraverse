@@ -49,11 +49,16 @@ QUESTIONS: dict[str, dict] = {
             "If a validation, sanitization, or authorization check guards this "
             "path, can a crafted attacker input bypass it? The guard's call "
             "site and its function definition (when resolvable, with module "
-            "constants like allowlists) are shown. Answer high only if you can "
-            "name a concrete bypass input (an allowed-but-dangerous value, a "
-            "blocklist gap, a normalization trick, a logic flaw). Answer low "
-            "if the shown definition actually blocks dangerous inputs, and "
-            "lowest if no guard is present."
+            "constants like allowlists) are shown, plus a check object: the "
+            "tested subject, the pattern or literal it is compared against, "
+            "whether the check is negated or gated on an env var, and its "
+            "kind (denylist blocks on match, allowlist blocks on non-match, "
+            "gate only conditions a branch). Answer high only if you can "
+            "name a concrete bypass input the shown check misses (an "
+            "allowed-but-dangerous value, a spelling the pattern does not "
+            "cover, a normalization trick, an unset env gate, a logic flaw). "
+            "Answer low if the shown definition actually blocks dangerous "
+            "inputs, and lowest if no guard is present."
         ),
     },
     "invariant_violation": {
