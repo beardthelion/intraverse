@@ -244,6 +244,65 @@ still dilutes. Net effect is positive but the dimension is really a
 designed-vs-arbitrary-input probe: it helps exactly the fixture class
 it was built for.
 
+### cdio-lfr fixture + stored-taint analyzer work (phase stub2)
+
+Third fixture: **changedetection.io** @ 0.48.04 (GHSA-j5vv-6wjg-cfr8,
+LFR via bypassable `file:` URI check on the stored watch URL): 110
+candidate paths, ONE sparse CVE, budget 12 — the sparsest test yet.
+
+Getting the CVE to enumerate required real analyzer work, each piece
+necessary on real code:
+
+- **Stored (second-order) taint**: the vulnerable value is
+  `self.watch.link` — user input persisted in the datastore and read
+  back later by an async worker. `self.<attr>` reads are now sources
+  when the attr was assigned from a store-backed expression
+  (`self.x = f(self.datastore...)`, plus always-on datastore/db/store/
+  cache/backend attr names).
+- **Qualname collision bug**: `Class.method` qualnames have no module
+  path, so four `fetcher.run` implementations silently overwrote each
+  other — on a 131-file repo many functions were simply absent.
+  Collisions now get `@filestem` suffixes.
+- **Polymorphic dispatch**: `self.fetcher.run` resolves via the declared
+  type (`self.fetcher = Fetcher()`) to ALL concrete subclass impls
+  (abstract bases excluded); same-class implementations across files
+  (alerta's swappable mongo/postgres backends) also fan out.
+- **Validation-call guards**: `re.search(p, tainted)` /
+  `x.startswith(...)` checks register as guards, and guard dominance
+  now crosses files (a check in the caller guards a sink in the callee
+  when it precedes the outgoing call edge). The `guard_bypassable`
+  machinery engages on the real-world guard shape.
+- **Enumeration cap**: `max_paths=500` silently truncated alerta (62 of
+  78 real paths) and hid every stored-source path on cdio. Now 20000.
+- **Propagation fix**: `_expr_taint_in` only saw tainted `Name` nodes,
+  so `f(url=self.watch.link)` never propagated; attribute/stored reads
+  in call args now carry taint.
+
+Route-aware results (stub agent, 12 picks/110 paths):
+
+```
+fixture    strategy   n   TP   FP    note
+cdio-lfr   jev        5   0    12    CVE path ranked ~14 every rep
+cdio-lfr   random     3   0    10
+cdio-lfr   static     2   0    12
+cdio-lfr   baseline   2   1    11    CVE path is early in enum order
+alerta     jev        3   2    10    was 4 under the 62-path analyzer
+alerta     random     2   4    8     density still does the work
+alerta     static     2   0    12
+```
+
+Sobering on two axes. On cdio, no ranker found the CVE: Jev ranks the
+`self.watch -> ... -> session.request` path ~14th, just under budget —
+its scores are internally consistent (gb=0.62 sees the weak check) but
+"fetch the stored URL" IS the app's core feature, so unintended_use
+legitimately drags it and insufficient_validation stays middling. The
+flat baseline found it twice only because it sits early in enumeration
+order. And on alerta, the analyzer improvements HURT jev (4 -> 2 route-
+aware TPs): the 16 newly-enumerated paths (mongo-backend siblings, more
+stored sources) are plausible-looking and pushed vuln routes out of the
+top 12. Coverage and ranking pull in opposite directions: every path the
+analyzer recovers is one more competitor for the budget.
+
 ## Conclusions
 
 1. **Did Jev improve path selection?** Yes, measurably, once candidates
@@ -272,7 +331,11 @@ it was built for.
    all six traps high. Defensible: the graph shows no guard, so they ARE
    suspicious; the investigator layer is where they should die. (b) SSRF on
    vuln-heap straddled the budget cut across runs. (c) The earlier catastrophic
-   miss was an adapter normalization bug, not the model.
+   miss was an adapter normalization bug, not the model. (d) On cdio it ranked
+   the real CVE ~14/110 in every rep — not a scoring error so much as a
+   semantic one: a stored URL that the app exists to fetch scores like the
+   feature it is. The weak `^file:/` check registered (gb=0.62) but cannot
+   carry a path whose other dimensions read "intended".
 
 5. **What is the biggest bottleneck?** Still the investigator, but now
    precisely characterized: stub falsifies real vulns it cannot reason
@@ -283,11 +346,15 @@ it was built for.
 
 6. **What experiment should run next?** (a) Done: intended-use scoring
    moved the whoogle CVE inside budget (4/5 reps) at a small cost on
-   alerta. (b) More real repos: alerta is
-   vuln-dense (random ≈ Jev) and whoogle is small — a mid-size repo with a
-   single sparse CVE would be the cleanest test yet. (c) Larger devin
-   ablation (n>=5) once per-run cost is tolerable; two reps is a hint, not
-   a measurement.
+   alerta. (b) Done: a mid-size sparse-CVE repo (cdio) showed the analyzer
+   was the bottleneck, then showed the ranker is too — stored-intended-
+   fetch vulns are the hardest class and NO ranker found it. (c) The next
+   discriminating signal is probably not another score but better
+   evidence in the state: Jev scored the cdio path honestly given that
+   "fetch the stored URL" looks benign; the missing information is the
+   *content* of the weak check vs the fetch semantics, which argues for
+   deeper guard-context extraction rather than new dimensions. (d) Larger
+   devin ablation (n>=5) once per-run cost is tolerable.
 
 7. **Methodological note.** "Verified TP" confounds ranker and investigator
    quality: the gb reruns have identical Jev picks under stub and devin, but
@@ -316,3 +383,11 @@ it was built for.
 - Jev requires network + `TYPESAFE_API_KEY`; devin-cli requires the Devin CLI.
 - Sandbox validation covers runnable stdlib HTTP fixtures only; other repos
   fall back to static proof.
+- Sources are only emitted for tainted *variables*: a bare tainted call arg
+  (`open(request.args['f'])` with no assignment) produces a sink site but
+  no source node, so no path. Stored-taint covers `self.<attr>` reads but
+  not module-level store handles (e.g. `cache.get(k)`).
+- The `request` short-name sink matches any `x.request(...)`; plausible
+  FPs on non-HTTP receivers.
+- Baseline's flat ordering is enumeration order, which is roughly source
+  order — early-file vulns flatter it (cdio: baseline TP=1 by position).

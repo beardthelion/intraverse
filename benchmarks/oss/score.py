@@ -40,6 +40,13 @@ ALERTA_VULN_ROUTES = {
 }
 ALERTA_EXECUTE_LINES = {1583, 1593, 1605, 1614, 1624, 1640, 1650}
 
+# cdio: GHSA-j5vv-6wjg-cfr8 — stored watch.url reaches session.request via
+# the bypassable file:/ check; only the watch-start fetch path is the CVE
+CDIO_TRUTH = {
+    "outbound_request": ("changedetectionio/content_fetchers/requests.py", 56,
+                         {"/<string:uuid>/start", "self.watch", "self.datastore"}),
+}
+
 LOC = re.compile(r"@(\S+):(\d+)")
 
 
@@ -92,6 +99,13 @@ def score_fixture(fixture: str, run_dir: Path):
         elif fixture == "alerta-sqli":
             ok = (cls == "raw_query" and sline in ALERTA_EXECUTE_LINES
                   and entry in ALERTA_VULN_ROUTES)
+        elif fixture == "cdio-lfr":
+            spec = CDIO_TRUTH.get(cls)
+            if spec:
+                tfile, tline, entries = spec
+                ok = (sfile.endswith(tfile)
+                      and abs(sline - tline) <= 1
+                      and entry in entries)
         if ok:
             tp += 1
             hits.append(f"{cls} via {entry}")

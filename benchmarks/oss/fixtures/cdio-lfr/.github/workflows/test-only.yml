@@ -1,0 +1,46 @@
+name: ChangeDetection.io App Test
+
+# Triggers the workflow on push or pull request events
+on: [push, pull_request]
+
+jobs:
+  lint-code:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Lint with flake8
+        run: |
+          pip3 install flake8
+          # stop the build if there are Python syntax errors or undefined names
+          flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
+          # exit-zero treats all errors as warnings. The GitHub editor is 127 chars wide
+          flake8 . --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
+
+  test-application-3-10:
+    needs: lint-code
+    uses: ./.github/workflows/test-stack-reusable-workflow.yml
+    with:
+      python-version: '3.10'
+
+
+  test-application-3-11:
+    needs: lint-code
+    uses: ./.github/workflows/test-stack-reusable-workflow.yml
+    with:
+      python-version: '3.11'
+      skip-pypuppeteer: true
+
+  test-application-3-12:
+    needs: lint-code
+    uses: ./.github/workflows/test-stack-reusable-workflow.yml
+    with:
+      python-version: '3.12'
+      skip-pypuppeteer: true
+
+  test-application-3-13:
+    needs: lint-code
+    uses: ./.github/workflows/test-stack-reusable-workflow.yml
+    with:
+      python-version: '3.13'
+      skip-pypuppeteer: true
+      

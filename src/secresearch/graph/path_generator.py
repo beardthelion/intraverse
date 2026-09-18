@@ -38,7 +38,7 @@ class AttackPathGenerator(ABC):
 class GraphPathGenerator(AttackPathGenerator):
     """Enumerates entry -> user-input -> ... -> sink chains in the CodeGraph."""
 
-    def __init__(self, max_depth: int = 10, max_paths: int = 500):
+    def __init__(self, max_depth: int = 10, max_paths: int = 20000):
         self.max_depth = max_depth
         self.max_paths = max_paths
         self._counter = itertools.count(1)

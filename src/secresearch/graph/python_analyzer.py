@@ -33,6 +33,10 @@ SANITIZER_NAME_RE = re.compile(
     r"(sanitize|validat|escape|allowlist|whitelist|is_safe|is_allowed|normalize_path|check_url)",
     re.IGNORECASE,
 )
+# Pattern checks on tainted input act as guards even though they are not
+# sanitizer-named: re.search(r'^file:/', url), url.startswith("safe://").
+VALIDATION_CALLS = {"search", "match", "fullmatch", "findall", "finditer",
+                    "startswith", "endswith"}
 SECRET_RE = re.compile(
     r"(password|passwd|secret|api_?key|private_?key|access_?token|auth_?token|session_?key|credential)",
     re.IGNORECASE,
@@ -43,6 +47,10 @@ SOURCE_ATTRS = {
 }
 SOURCE_CALLS = {"input"}
 SOURCE_NAMES = {"argv"}
+
+# self.<attr> reads that are treated as stored user input (second-order
+# taint: the data was supplied by a user earlier and read back now).
+STORED_SELF_ATTRS = {"datastore", "store", "db", "cache", "backend"}
 
 SINK_SPECS: dict[str, tuple[NodeType, str]] = {
     "os.system": (NodeType.PROCESS_EXEC, "command_execution"),
@@ -64,6 +72,7 @@ SINK_SPECS: dict[str, tuple[NodeType, str]] = {
     "requests.put": (NodeType.NET_OP, "outbound_request"),
     "requests.delete": (NodeType.NET_OP, "outbound_request"),
     "requests.request": (NodeType.NET_OP, "outbound_request"),
+    "request": (NodeType.NET_OP, "outbound_request"),
     "httpx.get": (NodeType.NET_OP, "outbound_request"),
     "httpx.post": (NodeType.NET_OP, "outbound_request"),
     "socket.connect": (NodeType.NET_OP, "outbound_request"),
@@ -175,6 +184,9 @@ class PythonAnalyzer(CodeGraphProvider):
         root = Path(repo_root).resolve()
         functions: dict[str, _FunctionInfo] = {}
         methods_by_name: dict[str, list[str]] = {}
+        self._class_bases: dict[str, set[str]] = {}
+        self._self_types: dict[str, dict[str, str]] = {}
+        self._stored_attrs: dict[str, set[str]] = {}
         skip_dirs = {"test", "tests", "testing", "venv", ".venv",
                      "node_modules", "__pycache__", "docs", "examples"}
         for py in sorted(root.rglob("*.py")):
@@ -188,6 +200,7 @@ class PythonAnalyzer(CodeGraphProvider):
                 continue
             self._collect_functions(tree, rel, functions, methods_by_name)
         self._methods_by_name = methods_by_name
+        self._collect_self_metadata(functions)
         for info in functions.values():
             self._analyze_function(info, functions, methods_by_name)
         self._propagate_taint(functions)
@@ -209,10 +222,19 @@ class PythonAnalyzer(CodeGraphProvider):
         functions: dict[str, _FunctionInfo],
         methods_by_name: dict[str, list[str]],
     ) -> None:
+        stem = Path(rel).stem
+        def unique(qualname: str) -> str:
+            """Qualnames omit the module path, so same-named defs across files
+            collide; suffix the file stem (then rel path) to disambiguate."""
+            if qualname not in functions:
+                return qualname
+            cand = f"{qualname}@{stem}"
+            return cand if cand not in functions else f"{qualname}@{rel}"
+
         def visit_body(body: list[ast.stmt], prefix: str) -> None:
             for stmt in body:
                 if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                    qualname = f"{prefix}{stmt.name}"
+                    qualname = unique(f"{prefix}{stmt.name}")
                     info = _FunctionInfo(qualname, rel, stmt)
                     functions[qualname] = info
                     methods_by_name.setdefault(stmt.name, []).append(qualname)
@@ -232,6 +254,11 @@ class PythonAnalyzer(CodeGraphProvider):
                         info.route = stmt.name[3:]
                     visit_body(stmt.body, qualname + ".")
                 elif isinstance(stmt, ast.ClassDef):
+                    self._class_bases.setdefault(stmt.name, set()).update(
+                        _dotted(b).split(".")[-1]
+                        for b in stmt.bases
+                        if isinstance(b, (ast.Name, ast.Attribute))
+                    )
                     visit_body(stmt.body, f"{prefix}{stmt.name}.")
                 elif isinstance(stmt, ast.If):
                     # `if __name__ == "__main__":` -> CLI entry
@@ -260,6 +287,120 @@ class PythonAnalyzer(CodeGraphProvider):
         )
         return bool(names)
 
+    # ------------------------------------------------------ self metadata
+
+    def _collect_self_metadata(self, functions: dict[str, _FunctionInfo]) -> None:
+        """Learn, per class, which self.<attr> names are (a) declared as a
+        known type via `self.x = SomeClass(...)` and (b) backed by a
+        persistent store via `self.x = <expr mentioning datastore/db/...>`."""
+        for info in functions.values():
+            cls = info.qualname.rsplit(".", 1)[0] if "." in info.qualname else ""
+            if not cls:
+                continue
+            for node in ast.walk(info.node):
+                if not isinstance(node, ast.Assign):
+                    continue
+                for t in node.targets:
+                    if not (isinstance(t, ast.Attribute)
+                            and isinstance(t.value, ast.Name)
+                            and t.value.id == "self"):
+                        continue
+                    # declared type: self.fetcher = Fetcher(); first wins so
+                    # __init__ declarations beat later concrete reassignments
+                    if (isinstance(node.value, ast.Call)
+                            and isinstance(node.value.func, ast.Name)):
+                        self._self_types.setdefault(cls, {}).setdefault(
+                            t.attr, node.value.func.id)
+                    elif isinstance(node.value, ast.Name):
+                        self._self_types.setdefault(cls, {}).setdefault(
+                            t.attr, node.value.id)
+                    # stored backing: any name/attribute segment that looks
+                    # like a persistent store
+                    for sub in ast.walk(node.value):
+                        if isinstance(sub, (ast.Name, ast.Attribute)):
+                            parts = _dotted(sub).split(".")
+                            if parts and parts[0] == "self":
+                                parts = parts[1:]
+                            if parts and parts[0] in STORED_SELF_ATTRS:
+                                self._stored_attrs.setdefault(cls, set()).add(t.attr)
+                                break
+
+    def _stored_names(self, info: _FunctionInfo) -> set[str]:
+        cls = info.qualname.rsplit(".", 1)[0] if "." in info.qualname else ""
+        return self._stored_attrs.get(cls, set()) | STORED_SELF_ATTRS
+
+    def _is_abstract(self, info: _FunctionInfo) -> bool:
+        """Body is only docstring/pass/raise NotImplementedError/ellipsis."""
+        for stmt in info.node.body:
+            if isinstance(stmt, ast.Pass):
+                continue
+            if (isinstance(stmt, ast.Expr)
+                    and isinstance(stmt.value, ast.Constant)
+                    and (stmt.value.value is Ellipsis or isinstance(stmt.value.value, str))):
+                continue
+            if (isinstance(stmt, ast.Raise)
+                    and isinstance(stmt.exc, ast.Call)
+                    and _dotted(stmt.exc.func).split(".")[-1] == "NotImplementedError"):
+                continue
+            if isinstance(stmt, ast.Raise) and stmt.exc is None:
+                continue
+            return False
+        return True
+
+    def _resolve_callees(
+        self,
+        cname: str,
+        caller: _FunctionInfo,
+        functions: dict[str, _FunctionInfo],
+        methods_by_name: dict[str, list[str]],
+    ) -> list[str]:
+        """Like _resolve_callee but fans out on polymorphic dispatch:
+        self.<attr>.<m> where <attr> has a declared type T resolves to T.m
+        plus every concrete subclass implementation of m."""
+        parts = cname.split(".")
+        if len(parts) >= 3 and parts[0] == "self":
+            cls = caller.qualname.rsplit(".", 1)[0] if "." in caller.qualname else ""
+            declared = self._self_types.get(cls, {}).get(parts[1])
+            if declared:
+                short = parts[-1]
+
+                def subclass_of(c: str) -> bool:
+                    seen = {c}
+                    todo = [c]
+                    while todo:
+                        x = todo.pop()
+                        if x == declared:
+                            return True
+                        for b in self._class_bases.get(x, ()):
+                            if b not in seen:
+                                seen.add(b)
+                                todo.append(b)
+                    return False
+
+                cands = []
+                for q in methods_by_name.get(short, []):
+                    cand_cls = q.rsplit(".", 1)[0].split("@")[0] if "." in q else ""
+                    if cand_cls and subclass_of(cand_cls):
+                        cands.append(q)
+                if cands:
+                    concrete = [q for q in cands if not self._is_abstract(functions[q])]
+                    return concrete or cands
+        callee = self._resolve_callee(cname, caller, functions, methods_by_name)
+        if not callee:
+            return []
+        # Fan out to same-class implementations in other files: two modules
+        # defining class X.m (e.g. swappable db backends) are all plausible
+        # targets of an ambiguous call, where a single pick is arbitrary.
+        short = cname.split(".")[-1]
+        callee_cls = callee.rsplit(".", 1)[0].split("@")[0] if "." in callee else ""
+        out = [callee]
+        if callee_cls:
+            for q in methods_by_name.get(short, []):
+                q_cls = q.rsplit(".", 1)[0].split("@")[0] if "." in q else ""
+                if q != callee and q_cls == callee_cls:
+                    out.append(q)
+        return out
+
     # ------------------------------------------------------------------ pass 2
 
     def _analyze_function(
@@ -284,12 +425,16 @@ class PythonAnalyzer(CodeGraphProvider):
                 return tainted.get(e.id, set())
             if isinstance(e, ast.Attribute):
                 base = _dotted(e)
+                if base in tainted:
+                    return tainted[base]
                 # request.args / self.path style reads
                 root, _, attr = base.partition(".")
                 if root in SOURCE_ATTRS and attr.split(".")[0] in SOURCE_ATTRS[root]:
                     return {f"{root}.{attr}"}
                 if root == "self" and attr.split(".")[0] in HTTP_SELF_SOURCES:
                     return {f"self.{attr}"}
+                if root == "self" and attr.split(".")[0] in self._stored_names(info):
+                    return {f"self.{attr.split('.')[0]}"}
                 if root == "sys" and attr.split(".")[0] in SOURCE_NAMES:
                     return {"sys.argv"}
                 if root == "os" and attr.split(".")[0] == "environ":
@@ -372,10 +517,15 @@ class PythonAnalyzer(CodeGraphProvider):
                                 (child, ntype.value, vuln, sorted(taint_labels), flags)
                             )
                         elif cname in KNOWN_SANITIZERS or short in KNOWN_SANITIZERS \
-                                or SANITIZER_NAME_RE.search(short):
+                                or SANITIZER_NAME_RE.search(short) \
+                                or short in VALIDATION_CALLS:
                             info.sanitizer_calls.append(child)
                         elif self._resolve_callee(cname, info, functions, methods_by_name):
                             pass  # inter-proc propagation handled in pass 3
+                    elif short in VALIDATION_CALLS and expr_taint(child.func):
+                        # method-style check on a tainted receiver:
+                        # url.startswith("file://") has no tainted args
+                        info.sanitizer_calls.append(child)
                     if AUTH_CALL_RE.match(short):
                         info.auth_calls.append(child)
                         if "perm" in short or "authz" in short or "owner" in short or "access" in short or "admin" in short or "role" in short:
@@ -459,27 +609,28 @@ class PythonAnalyzer(CodeGraphProvider):
             for qualname in worklist:
                 info = functions[qualname]
                 for call, cname in info.calls:
-                    callee = self._resolve_callee(cname, info, functions, getattr(self, "_methods_by_name", {}))
-                    if not callee or callee == qualname:
-                        continue
-                    target = functions[callee]
-                    named: dict[str, ast.expr] = {}
-                    for i, a in enumerate(call.args):
-                        if i < len(target.params):
-                            named[target.params[i]] = a
-                    for kw in call.keywords:
-                        if kw.arg:
-                            named[kw.arg] = kw.value
-                        else:  # **kwargs splat: taint all params conservatively
-                            for pname in target.params:
-                                named.setdefault(pname, kw.value)
-                    for pname, a in named.items():
-                        if pname not in target.params:
+                    for callee in self._resolve_callees(
+                            cname, info, functions, getattr(self, "_methods_by_name", {})):
+                        if callee == qualname:
                             continue
-                        labels = self._expr_taint_in(info, a)
-                        if labels and pname not in target.tainted_params:
-                            target.tainted_params.add(pname)
-                            next_round.append(callee)
+                        target = functions[callee]
+                        named: dict[str, ast.expr] = {}
+                        for i, a in enumerate(call.args):
+                            if i < len(target.params):
+                                named[target.params[i]] = a
+                        for kw in call.keywords:
+                            if kw.arg:
+                                named[kw.arg] = kw.value
+                            else:  # **kwargs splat: taint all params conservatively
+                                for pname in target.params:
+                                    named.setdefault(pname, kw.value)
+                        for pname, a in named.items():
+                            if pname not in target.params:
+                                continue
+                            labels = self._expr_taint_in(info, a)
+                            if labels and pname not in target.tainted_params:
+                                target.tainted_params.add(pname)
+                                next_round.append(callee)
             worklist = next_round
 
     def _expr_taint_in(self, info: _FunctionInfo, e: ast.expr) -> set[str]:
@@ -489,6 +640,14 @@ class PythonAnalyzer(CodeGraphProvider):
         def walk(n: ast.expr) -> None:
             if isinstance(n, ast.Name) and (n.id in srcs or n.id in info.tainted_params):
                 found.update(srcs.get(n.id, {"param"}))
+            elif isinstance(n, ast.Attribute):
+                base = _dotted(n)
+                if base in srcs:
+                    found.update(srcs[base])
+                else:
+                    root, _, attr = base.partition(".")
+                    if root == "self" and attr.split(".")[0] in self._stored_names(info):
+                        found.add(f"self.{attr.split('.')[0]}")
             for c in ast.iter_child_nodes(n):
                 if isinstance(c, ast.expr):
                     walk(c)
@@ -528,15 +687,16 @@ class PythonAnalyzer(CodeGraphProvider):
         # call edges
         for qualname, info in functions.items():
             for call, cname in info.calls:
-                callee = self._resolve_callee(cname, info, functions, getattr(self, "_methods_by_name", {}))
-                if callee and callee in fn_node_ids and callee != qualname:
-                    graph.add_edge(
-                        EdgeType.CALLS,
-                        fn_node_ids[qualname],
-                        fn_node_ids[callee],
-                        location=_loc(info.rel_file, qualname, call),
-                        callee=cname,
-                    )
+                for callee in self._resolve_callees(
+                        cname, info, functions, getattr(self, "_methods_by_name", {})):
+                    if callee in fn_node_ids and callee != qualname:
+                        graph.add_edge(
+                            EdgeType.CALLS,
+                            fn_node_ids[qualname],
+                            fn_node_ids[callee],
+                            location=_loc(info.rel_file, qualname, call),
+                            callee=cname,
+                        )
 
         # source, sink, authz, sanitizer, secret nodes
         for qualname, info in functions.items():

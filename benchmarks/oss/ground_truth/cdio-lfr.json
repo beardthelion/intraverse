@@ -1,0 +1,10 @@
+[
+  {
+    "class": "outbound_request",
+    "sink_file": "changedetectionio/content_fetchers/requests.py",
+    "sink_function": "run",
+    "sink_line": 56,
+    "route": "/<string:uuid>/start",
+    "note": "GHSA-j5vv-6wjg-cfr8: watch.url is stored user input; the file:/ check is bypassable (file:../../, file: /x) so session.request fetches local files"
+  }
+]

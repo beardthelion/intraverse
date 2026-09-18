@@ -134,6 +134,21 @@ class InvariantChecker:
                 return False
         return True
 
+    def _guard_dominates_on_path(
+        self, guard: GraphNode, sink: GraphNode, path: AttackPath, fn_id: str
+    ) -> bool:
+        if guard.location.file == sink.location.file:
+            return self._guard_dominates(guard, sink)
+        # Cross-file: a guard in a caller dominates a downstream sink when it
+        # precedes the call edge that continues the path (e.g. a validation
+        # check on the input before it is passed to the sink's function).
+        on_path = set(path.nodes)
+        for e in self.graph.out_edges(fn_id, EdgeType.CALLS):
+            if e.dst in on_path and e.location \
+                    and guard.location.line_start <= e.location.line_start:
+                return True
+        return False
+
     def sanitizer_nodes_on(self, path: AttackPath) -> list[GraphNode]:
         """Sanitizer transforms that dominate the path's sink."""
         sink = self.sink_node(path)
@@ -148,7 +163,8 @@ class InvariantChecker:
                 out.append(n)
             for e in self.graph.out_edges(nid, EdgeType.TRANSFORMS):
                 t = self.graph.nodes.get(e.dst)
-                if t and t.attrs.get("sanitizer") and self._guard_dominates(t, sink):
+                if t and t.attrs.get("sanitizer") \
+                        and self._guard_dominates_on_path(t, sink, path, nid):
                     out.append(t)
         return out
 

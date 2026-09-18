@@ -49,11 +49,11 @@ def append(row: dict) -> None:
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("phase", choices=["stub", "devin", "stub-uu"])
+    ap.add_argument("phase", choices=["stub", "devin", "stub-uu", "stub2"])
     args = ap.parse_args()
 
     # per-fixture budgets: paths must outnumber picks for ranking to matter
-    budgets = {"whoogle-ssrf": 6, "alerta-sqli": 12}
+    budgets = {"whoogle-ssrf": 6, "alerta-sqli": 12, "cdio-lfr": 12}
 
     def go(fixture, strategy, agent, seed, rep):
         if done(args.phase, fixture, strategy, rep):
@@ -67,7 +67,23 @@ def main() -> None:
               f"FP={m['false_positives']} missed={m['missed']} "
               f"jev_fail={m.get('jev_failures', 0)}", flush=True)
 
-    if args.phase == "stub-uu":
+    if args.phase == "stub2":
+        # post-stored-taint analyzer: cdio is new; alerta grew 62->78 paths
+        # after the enumeration-cap fix so its old rows are stale. whoogle
+        # and corpus-a are unchanged (no classes/stores, under old cap).
+        for rep in range(5):
+            go("cdio-lfr", "jev", "stub", 0, rep)
+        for rep in range(3):
+            go("cdio-lfr", "random", "stub", rep, rep)
+        for rep in range(2):
+            go("cdio-lfr", "static", "stub", 0, rep)
+            go("cdio-lfr", "baseline", "stub", 0, rep)
+        for rep in range(3):
+            go("alerta-sqli", "jev", "stub", 0, rep)
+        for rep in range(2):
+            go("alerta-sqli", "random", "stub", rep, rep)
+            go("alerta-sqli", "static", "stub", 0, rep)
+    elif args.phase == "stub-uu":
         # unintended_use dimension only affects jev scoring; heuristics are
         # identical to the stub phase and need no rerun
         for rep in range(5):

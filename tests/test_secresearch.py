@@ -74,6 +74,115 @@ class TestAnalyzer(unittest.TestCase):
         self.assertTrue(any(len(p.nodes) >= 3 for p in paths))
 
 
+def analyze_src(files: dict[str, str]):
+    tmp = tempfile.mkdtemp()
+    for rel, src in files.items():
+        p = Path(tmp) / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(src)
+    graph = PythonAnalyzer().build(tmp)
+    return graph, GraphPathGenerator().generate(graph)
+
+
+class TestStoredTaint(unittest.TestCase):
+    def test_stored_attr_is_source(self):
+        graph, paths = analyze_src({
+            "a.py": (
+                "class P:\n"
+                "    def __init__(self):\n"
+                "        self.watch = self.datastore.data['w'].get(1)\n"
+                "    def go(self):\n"
+                "        url = self.watch.link\n"
+                "        open(url)\n"
+            ),
+        })
+        self.assertTrue(any("self.watch" in p.label for p in paths))
+
+    def test_qualname_collision_keeps_both_files(self):
+        graph, _ = analyze_src({
+            "x/a.py": "class A:\n    def m(self):\n        pass\n",
+            "y/b.py": "class A:\n    def m(self):\n        pass\n",
+        })
+        ms = [n for n in graph.nodes.values()
+              if n.attrs.get("qualname", "").startswith("A.m")]
+        self.assertEqual(len(ms), 2)
+
+    def test_polymorphic_self_attr_fans_out(self):
+        # self.f = Base(); self.f.run(url) reaches the concrete subclass
+        # impl holding the sink, not just the abstract base.
+        graph, paths = analyze_src({
+            "base.py": (
+                "class Base:\n"
+                "    def run(self, url):\n"
+                "        pass\n"
+            ),
+            "impl.py": (
+                "from base import Base\n"
+                "class fetcher(Base):\n"
+                "    def run(self, url):\n"
+                "        session.request(url=url)\n"
+            ),
+            "app.py": (
+                "import requests\n"
+                "class App:\n"
+                "    def __init__(self):\n"
+                "        self.f = Base()\n"
+                "        self.watch = self.datastore.get('w')\n"
+                "    def go(self):\n"
+                "        url = self.watch.link\n"
+                "        self.f.run(url=url)\n"
+            ),
+        })
+        self.assertTrue(any("session.request" in p.label for p in paths))
+
+    def test_session_request_is_sink(self):
+        graph, _ = analyze_src({
+            "a.py": "import requests\ndef f():\n    s = requests.Session()\n    s.request(url=input())\n",
+        })
+        sinks = [n for n in graph.nodes.values() if n.type == NodeType.NET_OP]
+        self.assertTrue(any("request" in n.label for n in sinks))
+
+    def test_validation_call_is_guard(self):
+        graph, _ = analyze_src({
+            "a.py": (
+                "import re\n"
+                "from http.server import BaseHTTPRequestHandler\n"
+                "class H(BaseHTTPRequestHandler):\n"
+                "    def do_GET(self):\n"
+                "        url = self.path\n"
+                "        if re.search(r'^ok:', url):\n"
+                "            pass\n"
+                "        open(url)\n"
+            ),
+        })
+        guards = [n for n in graph.nodes.values()
+                  if n.type == NodeType.TRANSFORM and n.attrs.get("sanitizer")]
+        self.assertTrue(any("re.search" in n.label for n in guards))
+
+    def test_cross_file_guard_dominates(self):
+        # validation in the caller guards a sink in a callee's file when it
+        # precedes the outgoing call
+        graph, paths = analyze_src({
+            "app.py": (
+                "import re\n"
+                "import worker\n"
+                "from http.server import BaseHTTPRequestHandler\n"
+                "class H(BaseHTTPRequestHandler):\n"
+                "    def do_GET(self):\n"
+                "        url = self.path\n"
+                "        if re.search(r'^file:/', url):\n"
+                "            raise Exception('denied')\n"
+                "        worker.go(url)\n"
+            ),
+            "worker.py": "def go(url):\n    open(url)\n",
+        })
+        checker = InvariantChecker(graph)
+        opens = [p for p in paths
+                 if graph.nodes[p.nodes[-1]].attrs.get("vuln") == "file_access"]
+        self.assertTrue(opens)
+        self.assertTrue(checker.path_has_sanitizer(opens[0]))
+
+
 class TestGuards(unittest.TestCase):
     def test_same_line_sanitizer_dominates(self):
         graph, paths = analyze("clean-app")
