@@ -5,11 +5,12 @@ attack paths. Jev implements this interface; so do the ablation models
 
 from __future__ import annotations
 
+import re
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Any
 
-from ..models import AttackPath, PathScores, RunStats
+from ..models import AttackPath, NodeType, PathScores, RunStats
 from ..graph.code_graph import CodeGraph
 from ..graph.invariants import InvariantChecker
 
@@ -34,6 +35,60 @@ def path_state(path: AttackPath, graph: CodeGraph, checker: InvariantChecker,
         except OSError:
             pass
         hops.append({**h, "code": excerpt})
+    funcs = {
+        n.attrs.get("qualname", n.label.rstrip("()")): n
+        for n in graph.nodes_of_type(NodeType.FUNCTION)
+    }
+    guards = []
+    seen_guard_locs = set()
+    for g in checker.sanitizer_nodes_on(path) + checker.authz_nodes_on(path):
+        loc = (g.location.file, g.location.line_start)
+        if loc in seen_guard_locs:
+            continue
+        seen_guard_locs.add(loc)
+        excerpt = ""
+        try:
+            src = (root / g.location.file).read_text(errors="replace").splitlines()
+            lo = max(0, g.location.line_start - 2)
+            hi = min(len(src), g.location.line_start + excerpt_lines)
+            excerpt = "\n".join(f"{i+1}: {src[i]}" for i in range(lo, hi))
+        except OSError:
+            pass
+        guard = {
+            "call": g.attrs.get("call", g.label),
+            "file": g.location.file,
+            "line": g.location.line_start,
+            "code": excerpt,
+        }
+        # Resolve the guard call to its in-repo definition so the model judges
+        # the actual check, not just the call site. Includes module-level
+        # constants the body references (allowlists, blocklists).
+        fn = funcs.get(guard["call"])
+        if fn is not None:
+            try:
+                fsrc = (root / fn.location.file).read_text(
+                    errors="replace").splitlines()
+                body = fsrc[fn.location.line_start - 1:fn.location.line_end]
+                guard["definition"] = {
+                    "file": fn.location.file,
+                    "line": fn.location.line_start,
+                    "code": "\n".join(
+                        f"{fn.location.line_start + i}: {l}"
+                        for i, l in enumerate(body)),
+                }
+                body_names = set(re.findall(r"[A-Za-z_][A-Za-z0-9_]*",
+                                            "\n".join(body)))
+                consts = [
+                    f"{i+1}: {l}" for i, l in enumerate(fsrc)
+                    if l and not l[0].isspace()
+                    and re.match(r"[A-Za-z_][A-Za-z0-9_]*\s*=", l)
+                    and l.split("=")[0].strip() in body_names
+                ]
+                if consts:
+                    guard["definition"]["module_constants"] = "\n".join(consts)
+            except OSError:
+                pass
+        guards.append(guard)
     return {
         "path_id": path.id,
         "hypothesis": path.hypothesis,
@@ -50,6 +105,7 @@ def path_state(path: AttackPath, graph: CodeGraph, checker: InvariantChecker,
             "invariants_plausibly_violated": feats["violated_invariants"],
         },
         "hops": hops,
+        "guards": guards,
     }
 
 

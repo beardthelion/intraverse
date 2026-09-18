@@ -51,27 +51,27 @@ def main() -> None:
     summary = json.loads((OUT / "summary.json").read_text())
     truth = json.loads((HERE / "ground_truth" / "corpus-a.json").read_text())
 
-    groups: dict[tuple[str, str], list[dict]] = {}
+    groups: dict[tuple[str, str, str], list[dict]] = {}
     for row in summary:
-        groups.setdefault((row.get("agent", "stub"), row["strategy"]), []).append(row)
+        phase = row.get("phase") or ("devin" if row.get("agent") == "devin" else "stub")
+        groups.setdefault((row.get("agent", "stub"), row["strategy"], phase), []).append(row)
 
-    print(f"{'agent':6} {'strategy':9} {'n':>2} {'TP':>12} {'FP':>9} "
+    print(f"{'agent':6} {'strategy':9} {'phase':8} {'n':>2} {'TP':>12} {'FP':>9} "
           f"{'missed':>10} {'sel_prec':>9} {'sel_vulns':>9} {'explored':>8}")
-    for (agent, strat), rows in sorted(groups.items()):
+    for (agent, strat, phase), rows in sorted(groups.items()):
         tps = [r["metrics"]["true_positives"] for r in rows]
         fps = [r["metrics"]["false_positives"] for r in rows]
         missed = [r["metrics"]["missed"] for r in rows]
         expl = [r["metrics"]["paths_explored"] for r in rows]
         sel_precs, sel_hits = [], []
         for r in rows:
-            run_dir = OUT / ("devin" if agent == "devin" else "stub") \
-                / f"rep{r['rep']:02d}" / r["fixture"] / strat
+            run_dir = OUT / phase / f"rep{r['rep']:02d}" / r["fixture"] / strat
             tp, tot = selection_stats(run_dir, truth)
             if tot:
                 sel_precs.append(tp / tot)
                 sel_hits.append(tp)
         fmt = lambda xs: f"{statistics.mean(xs):.1f}[{min(xs)}-{max(xs)}]"
-        print(f"{agent:6} {strat:9} {len(rows):>2} {fmt(tps):>12} "
+        print(f"{agent:6} {strat:9} {phase:8} {len(rows):>2} {fmt(tps):>12} "
               f"{fmt(fps):>9} {fmt(missed):>10} "
               f"{statistics.mean(sel_precs):>8.0%} "
               f"{fmt(sel_hits):>9} {fmt(expl):>8}")

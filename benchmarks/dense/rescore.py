@@ -35,7 +35,7 @@ def main() -> None:
     summary_path = OUT / "summary.json"
     rows = json.loads(summary_path.read_text())
     for row in rows:
-        phase = "devin" if row.get("agent") == "devin" else "stub"
+        phase = row.get("phase") or ("devin" if row.get("agent") == "devin" else "stub")
         run_dir = OUT / phase / f"rep{row['rep']:02d}" / row["fixture"] / row["strategy"]
         if not (run_dir / "findings").exists():
             print("missing:", run_dir)

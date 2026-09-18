@@ -43,6 +43,19 @@ QUESTIONS: dict[str, dict] = {
         "type": "noul",
         "instructions": "Is the input on this path missing validation or sanitization appropriate for the sink it reaches?",
     },
+    "guard_bypassable": {
+        "type": "noul",
+        "instructions": (
+            "If a validation, sanitization, or authorization check guards this "
+            "path, can a crafted attacker input bypass it? The guard's call "
+            "site and its function definition (when resolvable, with module "
+            "constants like allowlists) are shown. Answer high only if you can "
+            "name a concrete bypass input (an allowed-but-dangerous value, a "
+            "blocklist gap, a normalization trick, a logic flaw). Answer low "
+            "if the shown definition actually blocks dangerous inputs, and "
+            "lowest if no guard is present."
+        ),
+    },
     "invariant_violation": {
         "type": "noul",
         "instructions": "Does this path plausibly violate a security invariant (untrusted input reaching a privileged sink, missing authorization, secret exposure)?",
@@ -165,6 +178,10 @@ class JevDecisionModel(DecisionModel):
         usage = resp.get("usage") or {}
         stats.jev_input_tokens += int(usage.get("input_tokens", 0))
         answers = resp.get("answers", {})
+        # bypassability is only meaningful when a guard exists; zero it out on
+        # unguarded paths so the weight cannot inflate them
+        guarded = checker.path_has_sanitizer(path) or checker.path_has_authz(path)
+        bypass = _noul(answers.get("guard_bypassable", {})) if guarded else 0.0
         return PathScores(
             attacker_control=_noul(answers.get("attacker_control", {})),
             trust_boundary_crossing=_noul(answers.get("trust_boundary_crossing", {})),
@@ -173,6 +190,7 @@ class JevDecisionModel(DecisionModel):
             insufficient_validation=_noul(answers.get("insufficient_validation", {})),
             invariant_violation=_noul(answers.get("invariant_violation", {})),
             research_value=_score01(answers.get("research_value", {})),
+            guard_bypassable=bypass,
             estimated_cost=0.2 + 0.8 * _score01(answers.get("investigation_cost", {})),
             continue_exploration=_noul(answers.get("continue_exploration", {})),
             raw={"answers": answers, "model": resp.get("model")},

@@ -197,6 +197,7 @@ class PathScores:
     invariant_violation: float = 0.0
     insufficient_validation: float = 0.0
     research_value: float = 0.0
+    guard_bypassable: float = 0.0  # P(guard on this path can be bypassed)
     estimated_cost: float = 1.0
     continue_exploration: float = 0.5
     raw: dict[str, Any] = field(default_factory=dict)

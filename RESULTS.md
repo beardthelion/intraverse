@@ -121,6 +121,44 @@ devin neither ranker put them in the top 12. "Guard present" dominates both
 scorers even when the guard is bypassable — the systematic blind spot this
 experiment exposed.
 
+## Guard-bypass scoring experiment
+
+Follow-up to close that blind spot. Three changes: `path_state` now resolves
+each guard call to its function definition (plus referenced module constants
+like allowlist contents, not just the call site), a `guard_bypassable`
+score dimension (weight 0.15, zeroed on unguarded paths) asks Jev whether a
+concrete attacker input defeats the shown guard, and the question requires
+naming a concrete bypass.
+
+Effect on ranking (single scoring pass over all 58 paths): the six hard
+vulns moved from ranks ~21-51 (all outside the 14-pick budget) to ranks
+2, 3, 6, 7, 10, 29 — five inside budget. Bypass scores on hards ran
+0.80-0.93 vs 0.0 on parameterized decoys. Residual noise: `os.path.basename`
+decoys still score 0.77-0.84 (Jev stays suspicious of basename), costing a
+few picks.
+
+Measured reruns:
+
+```
+agent  strategy       n   TP           FP          sel_prec  note
+stub   jev (old)     10   6.2 [6-7]    7.8 [7-8]   44%       0 hard picks
+stub   jev+gb        10   1.9 [1-3]    1.8 [0-3]   51%       53 hard picks,
+                                                           all falsified
+devin  jev (old)      2   4.5 [3-6]    0.5 [0-1]   63%       0 hard picks
+devin  jev+gb         2   7.5 [7-8]    0.0 [0-0]   76%       hards confirmed:
+                                                           r011,12,14,15,16
+```
+
+Read the stub and devin rows together. The ranker now sends the bypassable-
+guard vulns to the investigator (53 hard selections across 10 stub reps, up
+from 0) and selection precision rose in both settings. Under the stub,
+verified TP *drops* (1.9 vs 6.2): the stub falsifies every guarded path it
+is handed, so better ranking just spends more budget on paths the stub
+cannot judge. Under devin the same selections convert: TP 4.5 -> 7.5 with
+zero FPs — devin confirmed 5 of the 6 bypassable-guard vulns per rep,
+including the `localhost`-allowlist SSRF, the `|`-only command blacklist,
+and the quote-stripping SQLi.
+
 ## Conclusions
 
 1. **Did Jev improve path selection?** Yes, measurably, once candidates
@@ -136,10 +174,13 @@ experiment exposed.
    ~44% (stub) / 63% (devin) vs static's ~29%/42% — roughly half the wasted
    agent calls per verified vuln.
 
-3. **Did it discover vulnerabilities the baseline missed?** Partly. It found
-   ~1.5-2.5x more real vulns than static/random under budget. It did NOT find
-   the bypassable-guard class: "guard present" suppresses its score even when
-   the guard is fake, the same blind spot the static heuristic has.
+3. **Did it discover vulnerabilities the baseline missed?** After the
+   guard-bypass change, yes — including a class no ranker found before. With
+   guard definitions in the state and a `guard_bypassable` score, Jev put 5
+   of the 6 bypassable-guard vulns inside the 14-pick budget (previously 0),
+   and devin+gb verified TP 7.5/run with FP 0 — the best result in the
+   benchmark. The prerequisite was showing Jev the guard's *body*: scored on
+   call sites alone it ranked the hards no better than before.
 
 4. **Where did Jev make incorrect predictions?** (a) It cannot distinguish
    "tainted but bounded" (len/sha256/isalnum traps) from unguarded — it ranked
@@ -155,13 +196,19 @@ experiment exposed.
    injections). Second bottleneck: validator soundness — static proof
    verifies paths whose guards it cannot see, turning ranker noise into FPs.
 
-6. **What experiment should run next?** (a) Guard-quality scoring: ask Jev
-   specifically "is this guard bypassable?" on guarded paths rather than
-   letting guard presence suppress the score — the 6 hard vulns are the
-   discriminating class. (b) Point the pipeline at a real authorized OSS
-   repo with known CVEs to see if candidate counts reach the regime where
-   ranking dominates. (c) Larger devin ablation (n>=5) once per-run cost is
-   tolerable; two reps is a hint, not a measurement.
+6. **What experiment should run next?** (a) Point the pipeline at a real
+   authorized OSS repo with known CVEs to see if candidate counts reach the
+   regime where ranking dominates. (b) Larger devin ablation (n>=5) once
+   per-run cost is tolerable; two reps is a hint, not a measurement.
+   (c) Residual ranker noise: `os.path.basename` decoys still score 0.77-0.84
+   bypassable — either a sharper question or a second opinion dimension
+   ("is the guard applied to the exact value reaching the sink?") may cut it.
+
+7. **Methodological note.** "Verified TP" confounds ranker and investigator
+   quality: the gb reruns have identical Jev picks under stub and devin, but
+   opposite TP movement (6.2 -> 1.9 vs 4.5 -> 7.5). Selection precision
+   (fraction of *picks* that are real vulns) is the ranker-quality metric;
+   verified TP measures the pipeline end to end.
 
 ## Limitations
 

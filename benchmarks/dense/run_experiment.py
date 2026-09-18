@@ -23,9 +23,12 @@ SUMMARY = OUT / "summary.json"
 def done(phase: str, strategy: str, rep: int) -> bool:
     if not SUMMARY.exists():
         return False
+    def row_phase(r):
+        return r.get("phase") or ("devin" if r.get("agent") == "devin" else "stub")
+
     return any(
         r["strategy"] == strategy and r["rep"] == rep
-        and r.get("agent", "stub") == ("devin" if phase == "devin" else "stub")
+        and row_phase(r) == phase
         for r in json.loads(SUMMARY.read_text())
     )
 
@@ -39,6 +42,7 @@ def run(phase: str, strategy: str, agent: str, iters: int, seed: int, rep: int) 
     row = dict(report.rows[0])
     row["rep"] = rep
     row["agent"] = agent
+    row["phase"] = phase
     return row
 
 
@@ -51,7 +55,7 @@ def append(row: dict) -> None:
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("phase", choices=["stub", "devin"])
+    ap.add_argument("phase", choices=["stub", "devin", "stub-gb", "devin-gb"])
     args = ap.parse_args()
 
     def go(phase, strategy, agent, iters, seed, rep, tag):
@@ -73,10 +77,17 @@ def main() -> None:
         for i in range(3):
             for strategy in ("static", "baseline"):
                 go("stub", strategy, "stub", 14, 0, i, strategy)
-    else:
+    elif args.phase == "devin":
         for i in range(2):
             for strategy in ("jev", "static"):
                 go("devin", strategy, "devin", 12, 0, i, f"devin+{strategy}")
+    elif args.phase == "stub-gb":
+        # guard-bypassable scoring enabled (guard_bypassable weight + question)
+        for i in range(10):
+            go("stub-gb", "jev", "stub", 14, 0, i, "jev+gb")
+    else:  # devin-gb
+        for i in range(2):
+            go("devin-gb", "jev", "devin", 12, 0, i, "devin+jev+gb")
 
 
 if __name__ == "__main__":

@@ -204,6 +204,51 @@ class TestJevParsing(unittest.TestCase):
         self.assertEqual(_noul({}), 0.5)
         self.assertEqual(_noul({"noul": 0.9}), 0.9)
 
+    def test_guard_bypassable_only_when_guarded(self):
+        # bypassability must be zeroed on unguarded paths so its weight
+        # cannot inflate them
+        from secresearch.decision.jev import JevDecisionModel
+        from secresearch.models import RunStats
+
+        class FakeClient:
+            def evaluate(self, state, questions=None):
+                return {"answers": {"guard_bypassable": {"noul": 0.95}},
+                        "usage": {}}
+
+        graph, paths = analyze("vuln-fetch")
+        checker = InvariantChecker(graph)
+        model = JevDecisionModel(client=FakeClient())
+        stats = RunStats()
+        guarded = next(p for p in paths if sink_line(graph, p) == 42)
+        unguarded = next(p for p in paths if sink_line(graph, p) == 32)
+        self.assertEqual(
+            model.score_path(guarded, graph, checker, stats).guard_bypassable,
+            0.95)
+        self.assertEqual(
+            model.score_path(unguarded, graph, checker, stats).guard_bypassable,
+            0.0)
+
+    def test_state_includes_guard_code(self):
+        from secresearch.decision.base import path_state
+        graph, paths = analyze("vuln-fetch")
+        checker = InvariantChecker(graph)
+        guarded = next(p for p in paths if sink_line(graph, p) == 42)
+        state = path_state(guarded, graph, checker)
+        self.assertTrue(state["guards"])
+        self.assertTrue(any("is_allowed" in g["call"] for g in state["guards"]))
+
+    def test_state_resolves_guard_definition(self):
+        # guard judgments need the check's body, not just its call site
+        from secresearch.decision.base import path_state
+        graph, paths = analyze("vuln-fetch")
+        checker = InvariantChecker(graph)
+        guarded = next(p for p in paths if sink_line(graph, p) == 42)
+        guard = next(g for g in path_state(guarded, graph, checker)["guards"]
+                     if "is_allowed" in g["call"])
+        self.assertIn("definition", guard)
+        self.assertIn("ALLOWED", guard["definition"]["code"]
+                      + guard["definition"].get("module_constants", ""))
+
 
 class TestDevinReportParsing(unittest.TestCase):
     def _task(self):
