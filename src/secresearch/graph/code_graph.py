@@ -102,7 +102,7 @@ class CodeGraph:
         sources: list[str],
         sinks: list[str],
         max_depth: int = 10,
-        max_paths: int = 500,
+        max_paths: int = 20000,
     ) -> list[list[str]]:
         """Enumerate simple source->sink paths (DFS, bounded)."""
         sink_set = set(sinks)

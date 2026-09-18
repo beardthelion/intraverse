@@ -82,8 +82,11 @@ QUESTIONS: dict[str, dict] = {
         "instructions": (
             "Assume the attacker-controlled value reaches this sink and the "
             "shown checks fail to stop it. What does the operation then reach "
-            "or return, and where does that result go? Use the post-sink "
-            "lines shown for the sink hop. Answer high only when you can name "
+            "or return, and where does that result go? Use the state's "
+            "post_sink lines: consumers of the sink's return value in the "
+            "enclosing function, or the sink statement itself when the "
+            "result is returned or passed on; empty means the result was "
+            "discarded. Answer high only when you can name "
             "a concrete post-check outcome (local file contents land in state "
             "the attacker views, an arbitrary URI scheme or internal host is "
             "fetched, code runs). Answer low when the outcome is the feature "
@@ -142,7 +145,14 @@ class JevClient:
             )
             try:
                 with urllib.request.urlopen(req, timeout=self.timeout) as resp:
-                    return json.loads(resp.read())
+                    try:
+                        data = json.loads(resp.read())
+                    except ValueError as e:
+                        raise RuntimeError(
+                            "Jev API returned non-JSON body") from e
+                    if not isinstance(data, dict):
+                        raise RuntimeError("Jev API returned non-dict body")
+                    return data
             except urllib.error.HTTPError as e:
                 payload = e.read()[:500]
                 last = RuntimeError(f"Jev API error {e.code}: {payload!r}")
@@ -192,14 +202,14 @@ class JevDecisionModel(DecisionModel):
         stats: RunStats,
     ) -> PathScores:
         state = path_state(path, graph, checker)
+        guarded = (checker.path_has_sanitizer(path)
+                   or checker.path_has_authz(path))
         try:
             resp = self.client.evaluate(state)
         except RuntimeError as e:
             # degrade to a neutral score rather than aborting the run; the
             # failure counter keeps it visible in metrics
             stats.jev_failures += 1
-            guarded = (checker.path_has_sanitizer(path)
-                       or checker.path_has_authz(path))
             return PathScores(
                 attacker_control=0.5, trust_boundary_crossing=0.5,
                 authz_boundary_crossing=0.5, sensitive_sink=0.5,
@@ -215,7 +225,6 @@ class JevDecisionModel(DecisionModel):
         answers = resp.get("answers", {})
         # bypassability is only meaningful when a guard exists; zero it out on
         # unguarded paths so the weight cannot inflate them
-        guarded = checker.path_has_sanitizer(path) or checker.path_has_authz(path)
         bypass = _noul(answers.get("guard_bypassable", {})) if guarded else 0.0
         return PathScores(
             attacker_control=_noul(answers.get("attacker_control", {})),

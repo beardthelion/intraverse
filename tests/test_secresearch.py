@@ -460,8 +460,54 @@ class TestSinkReach(unittest.TestCase):
         graph, paths = analyze("vuln-fetch")
         checker = InvariantChecker(graph)
         model = JevDecisionModel(client=FailingClient())
-        scores = model.score_path(paths[0], graph, checker, RunStats())
-        self.assertEqual(scores.sink_reach, 0.5)
+        guarded = [p for p in paths
+                   if checker.path_has_sanitizer(p)
+                   or checker.path_has_authz(p)]
+        unguarded = [p for p in paths
+                     if not checker.path_has_sanitizer(p)
+                     and not checker.path_has_authz(p)]
+        self.assertTrue(guarded and unguarded)
+        g = model.score_path(guarded[0], graph, checker, RunStats())
+        u = model.score_path(unguarded[0], graph, checker, RunStats())
+        self.assertEqual(g.sink_reach, 0.5)
+        self.assertEqual(g.guard_bypassable, 0.5)
+        self.assertEqual(g.unintended_use, 0.5)
+        self.assertEqual(u.guard_bypassable, 0.0)
+
+    def test_sink_reach_question_sent_with_post_sink_state(self):
+        # deleting the QUESTIONS entry silently disables the dimension:
+        # the API never returns the answer and _noul defaults to 0.5
+        from secresearch.decision.jev import QUESTIONS, JevDecisionModel
+        from secresearch.models import RunStats
+        self.assertIn("sink_reach", QUESTIONS)
+
+        captured = {}
+
+        class FakeClient:
+            def evaluate(self, state, questions=None):
+                captured["state"] = state
+                return {"answers": {}, "usage": {}}
+
+        graph, paths = analyze_src({
+            "a.py": (
+                "import requests\n"
+                "from http.server import BaseHTTPRequestHandler\n"
+                "class H(BaseHTTPRequestHandler):\n"
+                "    def do_GET(self):\n"
+                "        url = self.path\n"
+                "        s = requests.Session()\n"
+                "        r = s.request(method='GET', url=url)\n"
+                "        self.body = r.text\n"
+            ),
+        })
+        checker = InvariantChecker(graph)
+        sinks = [p for p in paths
+                 if graph.nodes[p.nodes[-1]].attrs.get("vuln")
+                 == "outbound_request"]
+        model = JevDecisionModel(client=FakeClient())
+        model.score_path(sinks[0], graph, checker, RunStats())
+        self.assertIn("self.body = r.text",
+                      captured["state"]["post_sink"])
 
     def test_priority_includes_sink_reach_weight(self):
         from secresearch.models import PathScores
@@ -493,7 +539,7 @@ class TestSinkReach(unittest.TestCase):
         self.assertTrue(sinks)
         state = path_state(sinks[0], graph, checker)
         self.assertIn("self.body = r.text",
-                      state["hops"][-1].get("post_sink", ""))
+                      state["post_sink"])
 
     def test_state_post_sink_tracks_attr_targets(self):
         # `self.r = s.request(...)` assigns the result to instance state;
@@ -518,7 +564,7 @@ class TestSinkReach(unittest.TestCase):
         self.assertTrue(sinks)
         state = path_state(sinks[0], graph, checker)
         self.assertIn("self.body = self.r.text",
-                      state["hops"][-1].get("post_sink", ""))
+                      state["post_sink"])
 
     def test_state_post_sink_empty_when_result_unused(self):
         from secresearch.decision.base import path_state
@@ -539,16 +585,116 @@ class TestSinkReach(unittest.TestCase):
                  == "outbound_request"]
         self.assertTrue(sinks)
         state = path_state(sinks[0], graph, checker)
-        self.assertFalse(state["hops"][-1].get("post_sink"))
+        self.assertFalse(state["post_sink"])
+
+    def _post_sink_state(self, body: str, **kwargs):
+        from secresearch.decision.base import path_state
+        graph, paths = analyze_src({
+            "a.py": (
+                "import requests\n"
+                "from http.server import BaseHTTPRequestHandler\n"
+                "class H(BaseHTTPRequestHandler):\n"
+                "    def do_GET(self):\n"
+                "        url = self.path\n"
+                "        s = requests.Session()\n"
+                + body
+            ),
+        })
+        checker = InvariantChecker(graph)
+        sinks = [p for p in paths
+                 if graph.nodes[p.nodes[-1]].attrs.get("vuln")
+                 == "outbound_request"]
+        self.assertTrue(sinks)
+        return path_state(sinks[0], graph, checker, **kwargs)
+
+    def test_state_post_sink_follows_reassignment(self):
+        # `data = r.text` propagation must be load-bearing, not just
+        # lines that mention the originally tracked name
+        state = self._post_sink_state(
+            "        r = s.request(method='GET', url=url)\n"
+            "        data = r.text\n"
+            "        self.body = data\n")
+        self.assertIn("self.body = data", state["post_sink"])
+
+    def test_state_post_sink_multiline_assignment(self):
+        # the sink call's first line carries no `target =`; the target
+        # lives on the enclosing statement's first line
+        state = self._post_sink_state(
+            "        r = (\n"
+            "            s.request(method='GET', url=url)\n"
+            "        )\n"
+            "        self.body = r.text\n")
+        self.assertIn("self.body = r.text", state["post_sink"])
+
+    def test_state_post_sink_annotated_and_tuple_targets(self):
+        state = self._post_sink_state(
+            "        r: object = s.request(method='GET', url=url)\n"
+            "        self.body = r.text\n")
+        self.assertIn("self.body = r.text", state["post_sink"])
+        state = self._post_sink_state(
+            "        a, b = s.request(method='GET', url=url)\n"
+            "        self.body = a\n")
+        self.assertIn("self.body = a", state["post_sink"])
+
+    def test_state_post_sink_walrus_target(self):
+        state = self._post_sink_state(
+            "        if (r := s.request(method='GET', url=url)):\n"
+            "            self.body = r.text\n")
+        self.assertIn("self.body = r.text", state["post_sink"])
+
+    def test_state_post_sink_kills_reassigned_names(self):
+        # after `r = other()`, later uses of r consume the new value,
+        # not the sink result
+        state = self._post_sink_state(
+            "        r = s.request(method='GET', url=url)\n"
+            "        r = other()\n"
+            "        self.body = r.text\n")
+        self.assertIn("r = other()", state["post_sink"])
+        self.assertNotIn("self.body = r.text", state["post_sink"])
+
+    def test_state_post_sink_return_disposition(self):
+        # `return s.request(...)` binds nothing; the statement itself is
+        # the disposition evidence, distinct from "result unused"
+        state = self._post_sink_state(
+            "        return s.request(method='GET', url=url)\n")
+        self.assertIn("return s.request(", state["post_sink"])
+
+    def test_state_post_sink_single_location_on_truncation(self):
+        # one canonical location regardless of hop truncation
+        state = self._post_sink_state(
+            "        r = s.request(method='GET', url=url)\n"
+            "        self.body = r.text\n",
+            max_hops=1)
+        self.assertIn("self.body = r.text", state["post_sink"])
+        self.assertNotIn("post_sink", state["hops"][-1])
+
+    def test_post_sink_lines_no_enclosing_function(self):
+        from secresearch.decision.base import _post_sink_lines
+        graph, _ = analyze_src({
+            "a.py": (
+                "import requests\n"
+                "def f():\n"
+                "    r = requests.get('x')\n"
+            ),
+        })
+        out = _post_sink_lines(
+            {"file": "a.py", "line": 1}, graph, ["import requests"])
+        self.assertEqual(out, "")
 
 
 class TestConfigDefaults(unittest.TestCase):
     def test_max_paths_matches_generator_default(self):
         # benchmark runs truncated stored-source paths for two phases
         # because ScanConfig.max_paths overrode the generator default
+        import inspect
         from secresearch.graph.path_generator import GraphPathGenerator
-        self.assertGreaterEqual(
-            ScanConfig().max_paths, GraphPathGenerator().max_paths)
+        cap = GraphPathGenerator().max_paths
+        self.assertGreaterEqual(ScanConfig().max_paths, cap)
+        # the same silent-truncation trap exists one layer down: an
+        # enumerate_paths default narrower than the generator's
+        default = inspect.signature(
+            CodeGraph.enumerate_paths).parameters["max_paths"].default
+        self.assertGreaterEqual(default, cap)
 
 
 class TestDevinReportParsing(unittest.TestCase):

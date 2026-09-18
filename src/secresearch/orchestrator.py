@@ -110,6 +110,13 @@ class Orchestrator:
         ]
         if not todo:
             return
+        if self.decision.name == "jev":
+            # a single scoring pass must not overshoot the call budget: at
+            # max_paths=20000 the first-pass pool can exceed it entirely
+            remaining = self.config.budget_jev_calls - self.stats.jev_calls
+            todo = todo[:max(0, remaining)]
+            if not todo:
+                return
         self.decision.score_paths(todo, self.graph, self.checker, self.stats)
         for p in todo:
             p.priority = self._priority(p)

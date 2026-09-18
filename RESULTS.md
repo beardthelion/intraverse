@@ -522,6 +522,12 @@ the ~0.2+ a robust pick would need.
   Rank claims in the stub2/stub3 sections were measured manually on the
   full pool; in-run comparisons across phases now mix pool sizes
   (cdio 73 -> 118, alerta 75 -> 87).
+- Random-strategy reps written before the seed-forwarding fix all ran
+  seed=0 regardless of rep number, so each random rep group is n=1
+  distinct draws repeated, not independent samples.
+- Jev reps send identical local inputs each rep; rep independence rests
+  entirely on remote API nondeterminism. A deterministic or cached
+  upstream would silently collapse the rep count to n=1.
 - The generated corpus places easy vulns on early routes, which inflates the
   flat-ordering baseline's apparent precision; treat baseline as a floor.
 - Static proof cannot verify that a *dynamic* guard is effective, and cannot

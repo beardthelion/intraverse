@@ -5,7 +5,9 @@ attack paths. Jev implements this interface; so do the ablation models
 
 from __future__ import annotations
 
+import ast
 import re
+import textwrap
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Any
@@ -15,20 +17,62 @@ from ..graph.code_graph import CodeGraph
 from ..graph.invariants import InvariantChecker
 
 
-def _boundary(target: str) -> "re.Pattern[str]":
-    pat = re.escape(target)
-    if target[0].isalnum() or target[0] == "_":
-        pat = r"\b" + pat
-    if target[-1].isalnum() or target[-1] == "_":
-        pat += r"\b"
-    return re.compile(pat)
+def _dotted(node: ast.AST) -> str:
+    parts = []
+    while isinstance(node, ast.Attribute):
+        parts.append(node.attr)
+        node = node.value
+    if isinstance(node, ast.Name):
+        parts.append(node.id)
+    return ".".join(reversed(parts))
 
 
-_ASSIGN = re.compile(r"\s*([\w.\[\]'\"]+?)\s*=[^=]")
+def _target_names(t: ast.AST, subscript_binds: bool) -> list[str]:
+    """Names bound by an assignment target. When subscript_binds, a
+    subscript store binds the container (`d[k] = v` marks `d`); otherwise
+    it is excluded since it mutates rather than rebinds."""
+    if isinstance(t, (ast.Tuple, ast.List)):
+        return [n for e in t.elts for n in _target_names(e, subscript_binds)]
+    if isinstance(t, ast.Starred):
+        return _target_names(t.value, subscript_binds)
+    if isinstance(t, ast.Subscript):
+        if not subscript_binds:
+            return []
+        return _target_names(t.value, subscript_binds)
+    if isinstance(t, (ast.Name, ast.Attribute)):
+        return [_dotted(t)]
+    return []
 
 
-def _post_sink_lines(root: Path, sink_hop: dict, graph: CodeGraph,
-                     src: list[str] | None = None,
+def _bound_names(stmt: ast.stmt, subscript_binds: bool) -> list[str]:
+    targets: list[ast.AST] = []
+    if isinstance(stmt, ast.Assign):
+        targets = list(stmt.targets)
+    elif isinstance(stmt, (ast.AnnAssign, ast.AugAssign)):
+        targets = [stmt.target]
+    elif isinstance(stmt, (ast.For, ast.AsyncFor)):
+        targets = [stmt.target]
+    elif isinstance(stmt, (ast.With, ast.AsyncWith)):
+        targets = [i.optional_vars for i in stmt.items if i.optional_vars]
+    names = [n for t in targets for n in _target_names(t, subscript_binds)]
+    names += [_dotted(w.target) for w in ast.walk(stmt)
+              if isinstance(w, ast.NamedExpr)]
+    return names
+
+
+def _load_names(stmt: ast.stmt) -> list[tuple[int, str]]:
+    out = []
+    for n in ast.walk(stmt):
+        if isinstance(n, (ast.Name, ast.Attribute)) \
+                and isinstance(n.ctx, ast.Load):
+            d = _dotted(n)
+            if d:
+                out.append((n.lineno, d))
+    return out
+
+
+def _post_sink_lines(sink_hop: dict, graph: CodeGraph,
+                     src: list[str] | None,
                      max_lines: int = 16) -> str:
     """Lines in the sink's enclosing function that consume the sink call's
     return value: where the fetched/decoded result actually goes.
@@ -47,34 +91,60 @@ def _post_sink_lines(root: Path, sink_hop: dict, graph: CodeGraph,
         key=lambda f: (f.location.line_end or f.location.line_start)
                       - f.location.line_start,
         default=None)
-    if fn is None:
+    if fn is None or not src:
         return ""
-    if src is None:
-        try:
-            src = (root / fn.location.file).read_text(
-                errors="replace").splitlines()
-        except OSError:
-            return ""
-    call_line = src[sink_hop["line"] - 1] \
-        if 0 < sink_hop["line"] <= len(src) else ""
-    m = _ASSIGN.match(call_line)
-    if not m:
+    end = min(fn.location.line_end or sink_hop["line"], len(src))
+    try:
+        tree = ast.parse(textwrap.dedent(
+            "\n".join(src[fn.location.line_start - 1:end])))
+    except SyntaxError:
         return ""
-    tracked = {m.group(1): _boundary(m.group(1))}
-    out = []
-    last = min(fn.location.line_end or sink_hop["line"], len(src))
-    for lineno in range(sink_hop["line"] + 1, last + 1):
-        line = src[lineno - 1]
-        if not any(p.search(line) for p in tracked.values()):
+    off = fn.location.line_start - 1
+    rel = sink_hop["line"] - off
+    stmts = [n for n in ast.walk(tree)
+             if isinstance(n, ast.stmt)
+             and n.lineno <= rel <= (n.end_lineno or n.lineno)]
+    if not stmts:
+        return ""
+    stmt = min(stmts, key=lambda n: (n.end_lineno or n.lineno) - n.lineno)
+    seed = _bound_names(stmt, subscript_binds=True)
+    if not seed:
+        # no binding: the statement itself is the disposition (a result
+        # that is returned, passed to another call, or used as a check)
+        calls = sum(1 for n in ast.walk(stmt) if isinstance(n, ast.Call))
+        if isinstance(stmt, ast.Expr) and calls == 1:
+            return ""  # bare call: result discarded
+        line = src[stmt.lineno + off - 1]
+        return f"{stmt.lineno + off}: {line.rstrip()}"
+    tracked = set(seed)
+    out: list[str] = []
+    seen: set[int] = set()
+
+    def emit(lineno: int) -> None:
+        if lineno not in seen and 0 < lineno <= len(src) \
+                and len(out) < max_lines:
+            seen.add(lineno)
+            out.append(f"{lineno}: {src[lineno - 1].rstrip()}")
+
+    later = sorted(
+        (n for n in ast.walk(tree)
+         if isinstance(n, ast.stmt) and n.lineno > stmt.lineno),
+        key=lambda n: n.lineno)
+    for s2 in later:
+        hits = sorted({ln for ln, name in _load_names(s2) if any(
+            name == t or name.startswith(t + ".") for t in tracked)})
+        if hits:
+            tracked.update(_bound_names(s2, subscript_binds=True))
+            for ln in hits:
+                emit(ln + off)
             continue
-        # propagate through assignments: `res = r.json()` also tracks `res`
-        am = _ASSIGN.match(line)
-        if am and am.group(1) not in tracked and any(
-                p.search(line[am.end(1):]) for p in tracked.values()):
-            tracked[am.group(1)] = _boundary(am.group(1))
-        out.append(f"{lineno}: {line.rstrip()}")
-        if len(out) >= max_lines:
-            break
+        kill = [b for b in _bound_names(s2, subscript_binds=False)
+                if b in tracked]
+        if kill:
+            # `r = other()` ends r's consumer chain; show the reassignment
+            # so the model sees where tracking stopped
+            emit(s2.lineno + off)
+            tracked.difference_update(kill)
     return "\n".join(out)
 
 
@@ -100,7 +170,6 @@ def path_state(path: AttackPath, graph: CodeGraph, checker: InvariantChecker,
         return file_cache[rel]
 
     node_ids = path.nodes[:max_hops]
-    n_hops = len(feats["hops"])
     for i, h in enumerate(feats["hops"][:max_hops]):
         excerpt = ""
         src = read_lines(h["file"])
@@ -175,9 +244,7 @@ def path_state(path: AttackPath, graph: CodeGraph, checker: InvariantChecker,
     if feats["hops"]:
         sink_hop = feats["hops"][-1]
         post_sink = _post_sink_lines(
-            root, sink_hop, graph, read_lines(sink_hop["file"]))
-    if n_hops <= max_hops and hops:
-        hops[-1]["post_sink"] = post_sink
+            sink_hop, graph, read_lines(sink_hop["file"]))
     state = {
         "path_id": path.id,
         "hypothesis": path.hypothesis,
@@ -195,9 +262,8 @@ def path_state(path: AttackPath, graph: CodeGraph, checker: InvariantChecker,
         },
         "hops": hops,
         "guards": guards,
+        "post_sink": post_sink,
     }
-    if n_hops > max_hops:
-        state["post_sink"] = post_sink
     return state
 
 
