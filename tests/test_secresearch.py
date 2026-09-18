@@ -741,6 +741,104 @@ class TestGuardCheck(unittest.TestCase):
         self.assertEqual(check["kind"], "gate")
 
 
+class TestSinkInput(unittest.TestCase):
+    def _state(self, body: str, header: str = ""):
+        from secresearch.decision.base import path_state
+        graph, paths = analyze_src({
+            "a.py": (
+                "import os, re, requests\n"
+                "from http.server import BaseHTTPRequestHandler\n"
+                + header +
+                "class H(BaseHTTPRequestHandler):\n"
+                "    def do_GET(self):\n"
+                "        url = self.path\n"
+                "        s = requests.Session()\n"
+                + body
+            ),
+        })
+        checker = InvariantChecker(graph)
+        sinks = [p for p in paths
+                 if graph.nodes[p.nodes[-1]].attrs.get("vuln")
+                 == "outbound_request"]
+        self.assertTrue(sinks)
+        return path_state(sinks[0], graph, checker)
+
+    def test_unconstrained_arg(self):
+        # a bare variable leaves the whole resource, scheme included,
+        # attacker-chosen
+        state = self._state(
+            "        s.request(method='GET', url=url)\n")
+        si = state["sink_input"]
+        self.assertEqual(si["arg"], "url")
+        self.assertEqual(si["constraint"], "unconstrained")
+        self.assertTrue(si["scheme_control"])
+
+    def test_literal_prefix_fstring(self):
+        # f'https://h/{x}' pins scheme and host even though x is tainted
+        state = self._state(
+            "        s.request(method='GET', "
+            "url=f'https://api.internal/{url}')\n")
+        si = state["sink_input"]
+        self.assertEqual(si["constraint"], "prefix")
+        self.assertEqual(si["prefix"], "https://api.internal/")
+        self.assertFalse(si["scheme_control"])
+
+    def test_literal_prefix_concat(self):
+        state = self._state(
+            "        s.request(method='GET', url='https://h/' + url)\n")
+        si = state["sink_input"]
+        self.assertEqual(si["constraint"], "prefix")
+        self.assertFalse(si["scheme_control"])
+
+    def test_gate_pins_same_subject(self):
+        # the sink sits inside `if url.startswith(pin)`: the gate
+        # constrains what url can name at sink time (the add_watch shape)
+        state = self._state(
+            "        if url.startswith('https://cdn.example/'):\n"
+            "            s.request(method='GET', url=url)\n")
+        si = state["sink_input"]
+        self.assertIn("https://cdn.example/", str(si["pinned"]))
+        self.assertFalse(si["scheme_control"])
+        check = next(g["check"] for g in state["guards"]
+                     if "startswith" in g["call"])
+        self.assertTrue(check["gates_sink"])
+
+    def test_allowlist_pins_same_subject(self):
+        # `if not url.startswith(pin): raise` constrains reach the same
+        # way even though the sink is outside the conditional
+        state = self._state(
+            "        if not url.startswith('https://cdn.example/'):\n"
+            "            raise Exception('denied')\n"
+            "        s.request(method='GET', url=url)\n")
+        si = state["sink_input"]
+        self.assertIn("https://cdn.example/", str(si["pinned"]))
+        self.assertFalse(si["scheme_control"])
+
+    def test_denylist_does_not_pin(self):
+        # the cdio CVE shape: a denylist excludes one pattern but leaves
+        # the rest of the scheme space open
+        state = self._state(
+            "        if re.search(r'^file:/', url):\n"
+            "            raise Exception('denied')\n"
+            "        s.request(method='GET', url=url)\n")
+        si = state["sink_input"]
+        self.assertNotIn("pinned", si)
+        self.assertTrue(si["scheme_control"])
+
+    def test_urljoin_keeps_scheme_control(self):
+        # urljoin(base, url) with a tainted url: an absolute URI
+        # overrides the base, so the base does not pin the scheme
+        state = self._state(
+            "        s.request(method='GET', "
+            "url=urljoin(BASE, url))\n",
+            header="from urllib.parse import urljoin\n"
+                   "BASE = 'https://b.example/'\n")
+        si = state["sink_input"]
+        self.assertEqual(si["constraint"], "urljoin")
+        self.assertEqual(si["base"], "https://b.example/")
+        self.assertTrue(si["scheme_control"])
+
+
 class TestConfigDefaults(unittest.TestCase):
     def test_max_paths_matches_generator_default(self):
         # benchmark runs truncated stored-source paths for two phases

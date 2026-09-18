@@ -97,7 +97,9 @@ def _fn_tree(graph: CodeGraph, file: str, line: int,
 
 
 def _guard_check(guard, graph: CodeGraph,
-                 src: list[str] | None) -> dict | None:
+                 src: list[str] | None,
+                 sink_file: str | None = None,
+                 sink_line: int | None = None) -> dict | None:
     """Structural reading of the check around a guard call: what is tested
     against what pattern, under which env gates, and whether a match
     denies the flow (denylist), a non-match denies it (allowlist), or the
@@ -116,6 +118,10 @@ def _guard_check(guard, graph: CodeGraph,
         default=None)
     if cond is None:
         return None
+    gate_sink = (
+        sink_file == guard.location.file and sink_line is not None
+        and any(s.lineno <= sink_line - off <= (s.end_lineno or s.lineno)
+                for s in getattr(cond, "body", [])))
     check: dict[str, Any] = {}
     calls = [c for c in ast.walk(cond.test)
              if isinstance(c, ast.Call) and c.lineno == rel]
@@ -161,7 +167,135 @@ def _guard_check(guard, graph: CodeGraph,
     check["kind"] = ("denylist" if on_true == "deny" and not negated
                      else "allowlist" if on_true == "deny"
                      else "gate")
+    if gate_sink:
+        check["gates_sink"] = True
     return check or None
+
+
+def _subject_root(expr_src: str | None) -> str | None:
+    """Reduce a check subject or sink arg to the name it roots in:
+    ``url.strip()`` -> ``url``, ``str(url)`` -> ``url``,
+    ``self.a['k']`` -> ``self.a``. Returns None for literals."""
+    if not expr_src:
+        return None
+    try:
+        node = ast.parse(expr_src, mode="eval").body
+    except SyntaxError:
+        return None
+    while True:
+        if isinstance(node, ast.Call):
+            node = (node.func.value
+                    if isinstance(node.func, ast.Attribute)
+                    else node.args[0] if node.args else node.func)
+        elif isinstance(node, ast.Subscript):
+            node = node.value
+        else:
+            break
+    return _dotted(node) or None
+
+
+def _literal_prefix(node: ast.AST,
+                    consts: dict[str, str]) -> str | None:
+    """Leading literal text of an argument expression: the part of an
+    f-string or +-concatenation that is fixed at the call site. A Name
+    operand resolves through module-level ``NAME = 'lit'`` constants."""
+    if isinstance(node, ast.Constant):
+        return node.value if isinstance(node.value, str) else ""
+    if isinstance(node, ast.JoinedStr):
+        v0 = node.values[0] if node.values else None
+        return v0.value if isinstance(v0, ast.Constant) else None
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        left = _literal_prefix(node.left, consts)
+        return left if left is not None else _literal_prefix(
+            node.right, consts)
+    if isinstance(node, ast.Name):
+        return consts.get(node.id)
+    if isinstance(node, ast.Call):
+        if isinstance(node.func, ast.Attribute) and \
+                node.func.attr in {"format", "join"}:
+            return _literal_prefix(node.func.value, consts)
+        if _dotted(node.func).endswith("urljoin") and node.args:
+            return _literal_prefix(node.args[0], consts)
+    return None
+
+
+_TARGET_KWARGS = {"url", "uri", "path", "file", "filename", "target",
+                  "host", "addr", "address", "dest", "endpoint"}
+
+
+def _sink_input(sink_hop: dict, call_name: str, graph: CodeGraph,
+                src: list[str] | None,
+                guards: list[dict]) -> dict | None:
+    """What the sink's target argument can name. A bare variable leaves
+    the resource attacker-chosen; a literal prefix or an allowlist/gate
+    check on the same subject pins it. ``scheme_control`` is false only
+    when the effective prefix pins a ``scheme:`` designator; urljoin keeps
+    it true because an absolute URI overrides the base."""
+    tree, off = _fn_tree(graph, sink_hop["file"], sink_hop["line"], src)
+    if tree is None:
+        return None
+    rel = sink_hop["line"] - off
+    short = call_name.rstrip("()").rsplit(".", 1)[-1]
+    calls = [c for c in ast.walk(tree)
+             if isinstance(c, ast.Call) and c.lineno == rel]
+    call = next(
+        (c for c in calls
+         if _dotted(c.func).rsplit(".", 1)[-1] == short),
+        calls[-1] if calls else None)
+    if call is None:
+        return None
+    kw = next((k for k in call.keywords if k.arg in _TARGET_KWARGS), None)
+    arg = kw.value if kw else (call.args[0] if call.args else None)
+    if arg is None:
+        return None
+    consts = {}
+    for l in src or []:
+        if l and not l[0].isspace():
+            m = re.match(r"([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(['\"].*['\"])",
+                         l)
+            if m:
+                consts[m.group(1)] = m.group(2).strip("'\"")
+    out: dict[str, Any] = {
+        "arg": kw.arg if kw else "arg0",
+        "expr": ast.unparse(arg)}
+    if isinstance(arg, ast.Constant):
+        out["constraint"] = "literal"
+    elif isinstance(arg, ast.Call) and _dotted(arg.func).endswith(
+            "urljoin"):
+        out["constraint"] = "urljoin"
+        base = _literal_prefix(arg.args[0], consts) if arg.args else None
+        if base:
+            out["base"] = base
+    else:
+        prefix = _literal_prefix(arg, consts)
+        if prefix:
+            out["constraint"], out["prefix"] = "prefix", prefix
+        elif isinstance(arg, (ast.Name, ast.Attribute, ast.Subscript)):
+            out["constraint"] = "unconstrained"
+        else:
+            out["constraint"] = "expression"
+    root = _subject_root(out["expr"])
+    # A check pins the argument when it is an allowlist on the same
+    # subject, or when the sink sits in the check's true-branch: either
+    # way the value at sink time satisfies the pattern. A negated gate
+    # excludes the pattern instead of pinning it.
+    pinned = [chk["pattern"] for g in guards
+              if (chk := g.get("check"))
+              and chk.get("pattern")
+              and (chk.get("kind") == "allowlist"
+                   or (chk.get("gates_sink")
+                       and not chk.get("negated")))
+              and _subject_root(chk.get("subject")) == root]
+    if pinned:
+        out["pinned"] = pinned
+    if out["constraint"] == "literal":
+        out["scheme_control"] = False
+    else:
+        # urljoin's base is excluded: an absolute URI overrides it, so
+        # only a guard-pin or a literal arg prefix can fix the scheme
+        effective = out.get("prefix") or (pinned[0] if pinned else "")
+        out["scheme_control"] = ":" not in effective
+    return out
 
 
 def _post_sink_lines(sink_hop: dict, graph: CodeGraph,
@@ -275,6 +409,7 @@ def path_state(path: AttackPath, graph: CodeGraph, checker: InvariantChecker,
     }
     guards = []
     seen_guard_locs = set()
+    sink_hop = feats["hops"][-1] if feats["hops"] else None
     for g in checker.sanitizer_nodes_on(path) + checker.authz_nodes_on(path):
         loc = (g.location.file, g.location.line_start)
         if loc in seen_guard_locs:
@@ -292,7 +427,10 @@ def path_state(path: AttackPath, graph: CodeGraph, checker: InvariantChecker,
             "line": g.location.line_start,
             "code": excerpt,
         }
-        check = _guard_check(g, graph, gsrc)
+        check = _guard_check(
+            g, graph, gsrc,
+            sink_file=sink_hop["file"] if sink_hop else None,
+            sink_line=sink_hop["line"] if sink_hop else None)
         if check:
             guard["check"] = check
         # Resolve the guard call to its in-repo definition so the model judges
@@ -321,10 +459,13 @@ def path_state(path: AttackPath, graph: CodeGraph, checker: InvariantChecker,
                 guard["definition"]["module_constants"] = "\n".join(consts)
         guards.append(guard)
     post_sink = ""
-    if feats["hops"]:
-        sink_hop = feats["hops"][-1]
+    sink_input = None
+    if sink_hop:
         post_sink = _post_sink_lines(
             sink_hop, graph, read_lines(sink_hop["file"]))
+        sink_input = _sink_input(
+            sink_hop, feats["sink_call"], graph,
+            read_lines(sink_hop["file"]), guards)
     state = {
         "path_id": path.id,
         "hypothesis": path.hypothesis,
@@ -343,6 +484,7 @@ def path_state(path: AttackPath, graph: CodeGraph, checker: InvariantChecker,
         "hops": hops,
         "guards": guards,
         "post_sink": post_sink,
+        "sink_input": sink_input,
     }
     return state
 

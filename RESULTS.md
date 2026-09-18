@@ -461,6 +461,63 @@ robust within-class separation. The residual gap is reach semantics
 the model cannot see without evaluating which URI schemes or hosts
 a fetched attacker value can actually name.
 
+### Reach semantics: sink_input constraint extraction (post-stub4 lever)
+
+Within-class discrimination on the cdio pool reduces to one
+question: which URI schemes and hosts can the fetched value name
+given the checks that passed. `path_state` now emits `sink_input`:
+the sink call's target argument classified as `unconstrained` (a
+bare variable; the attacker names the whole URI), `prefix`/`literal`
+(a fixed leading part from an f-string, concat, or module
+constant), or `urljoin` (a base that an absolute URI still
+overrides); plus `pinned`, the patterns of allowlist checks and
+same-subject gates whose true-branch contains the sink; and
+`scheme_control`, whether the attacker can still choose the URI
+scheme after those pins. A gate pins even when its `kind` reads
+denylist: a sink inside the check's true-branch sees only values
+satisfying the pattern, so `gates_sink` overrides polarity (a
+negated gate excludes rather than pins).
+
+On the fixture this splits the outbound_request sinks into the
+classes that matter:
+
+| path | sink_input |
+|------|-----------|
+| CVE: `session.request(url)` after the `^file:/` denylist | `unconstrained`, scheme_control=true, no pins |
+| add_watch: `requests.request(url)` inside `url.startswith('https://changedetection.io/share/')` | `pinned: ['https://changedetection.io/share/']`, scheme_control=false |
+| literal-URL calls | `literal`, scheme_control=false |
+
+Measured effect (direct probe, 2 reps, then one full-pool pass):
+
+| signal | before | after |
+|--------|--------|-------|
+| CVE sink_reach | ~0.78 | 0.80-0.81 |
+| pinned siblings' sink_reach | 0.76-0.80 | 0.46-0.55 |
+| CVE rank (full pool) | 12, 12 | 9 |
+
+The question needed one sharpening: phrased as a soft conditional
+("answer low when scheme_control is false AND the pin caps at a
+safe target"), siblings still scored 0.76-0.80 — the model judged
+the pinned endpoint's JSON-merge outcome as concrete anyway.
+Restated as a rule (scheme_control=false confines the URI to the
+pinned prefix; answer low even if the response is stored or
+parsed), the dimension separated >0.3, above the 0.2 bar — the
+first within-class separation on this fixture.
+
+The composite still does not flip pairwise: sink_reach carries
+weight 0.15, so the 0.3 dimension gap contributes ~0.05 of value
+and the pinned siblings' other dimensions (gb 0.71-0.78, uu
+0.60-0.75, ac ~0.80) keep them at 2.23-2.40 vs the CVE's 2.10.
+What changed in the full-pool ranking is the *composition* above
+the cut: the paths now ahead of the CVE are stored-name `open()`
+file reads (sc=true, sr 0.71-0.80 — a genuinely reach-dangerous
+class), not its safe pinned-fetch twins. The rank moved from the
+budget boundary (12) inside it with margin (9). The state now
+carries the discriminating fact, the model scores it, and the
+remaining dilution is aggregation: whether a sharper ranker needs
+a bigger weight on reach or fewer confounded dimensions is a
+weighting question, not a perception one.
+
 ## Conclusions
 
 1. **Did Jev improve path selection?** Yes, measurably, once candidates
@@ -526,10 +583,19 @@ a fetched attacker value can actually name.
    pattern, polarity, env gates). The CVE's bypass score rose ~0.11
    and its rank stabilized at 12/118, but the top of the pool is
    still uniformly-plausible stored fetches — the lever sharpened
-   the signal without producing robust separation. (f) Next levers:
-   reach semantics (which URI schemes/hosts the fetched value can
-   name given the check that passed), and a larger devin ablation
-   (n>=5) once per-run cost is tolerable.
+   the signal without producing robust separation. (f) Done: reach
+   semantics — `sink_input` classifies the sink's target argument
+   and folds in same-subject allowlist/gate pins into a
+   `scheme_control` verdict. It produced the first clean
+   within-class separation (sink_reach 0.80 vs 0.46-0.55 on pinned
+   siblings) and moved the CVE rank from 12 to 9 of 118, inside
+   budget with margin; the paths still ahead are a legitimately
+   reach-dangerous `open()` class, not the safe pinned fetches.
+   (g) Next levers: composite weighting (the separating dimension
+   carries only 0.15 of value; the pairwise order still favors
+   pinned siblings), a second mid-size fixture to test whether
+   scheme_control generalizes beyond this CVE shape, and a larger
+   devin ablation (n>=5) once per-run cost is tolerable.
 
 7. **Methodological note.** "Verified TP" confounds ranker and investigator
    quality: the gb reruns have identical Jev picks under stub and devin, but
