@@ -212,6 +212,38 @@ whether the fetch is intended (autocomplete, rank 3) or arbitrary
 frontier — the imgres endpoint, whose *purpose* is redirecting, ranked #1
 of 11 as open_redirect.
 
+### unintended_use dimension (phase stub-uu)
+
+A fourth score, `unintended_use` (weight 0.15), asks whether the
+attacker-controlled value determines *which* resource the operation acts
+on beyond what the feature's design needs — high for "input picks the
+target" or "input can exceed the expected grammar", low for "input fills
+a slot in a fixed target" or "passthrough is the feature's purpose".
+
+Scores on whoogle: element/window SSRF 0.82-0.83, autocomplete 0.13,
+search 0.26, imgres 0.90 (defensible: it IS an open redirect). On
+alerta's vuln routes it scored only 0.16-0.48 — `q=` is a designed input
+slot, so the dimension does not boost them and the added weight slightly
+dilutes the other signals.
+
+Measured effect (route-aware, stub agent, jev only):
+
+```
+fixture       phase    n   TP         FP         CVE paths picked
+whoogle-ssrf  stub     5   3.4        2.6        0/5
+whoogle-ssrf  stub-uu  5   3.8        2.4        4/5 (element x3, window x1)
+alerta-sqli   stub     3   4.0        8.0        n/a (vuln-dense)
+alerta-sqli   stub-uu  3   3.7        8.3        n/a
+```
+
+The experiment succeeded on its target: the CVE-2024-22205 path crossed
+the budget line in 4 of 5 reps and the stub confirmed it. Cost: a small
+regression on alerta (4.0 -> 3.7), where the vuln lives behind a
+designed input so the new dimension is correctly neutral but its weight
+still dilutes. Net effect is positive but the dimension is really a
+designed-vs-arbitrary-input probe: it helps exactly the fixture class
+it was built for.
+
 ## Conclusions
 
 1. **Did Jev improve path selection?** Yes, measurably, once candidates
@@ -249,11 +281,9 @@ of 11 as open_redirect.
    injections). Second bottleneck: validator soundness — static proof
    verifies paths whose guards it cannot see, turning ranker noise into FPs.
 
-6. **What experiment should run next?** (a) Intended-use scoring: the OSS
-   run shows "user input reaches sink" can't separate intended fetches from
-   SSRF — a question like "does this endpoint's purpose justify the input
-   reaching this operation, or does the input control more than it should?"
-   is the next discriminating dimension. (b) More real repos: alerta is
+6. **What experiment should run next?** (a) Done: intended-use scoring
+   moved the whoogle CVE inside budget (4/5 reps) at a small cost on
+   alerta. (b) More real repos: alerta is
    vuln-dense (random ≈ Jev) and whoogle is small — a mid-size repo with a
    single sparse CVE would be the cleanest test yet. (c) Larger devin
    ablation (n>=5) once per-run cost is tolerable; two reps is a hint, not

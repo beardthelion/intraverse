@@ -107,7 +107,8 @@ def main():
     for fdir in sorted(root.rglob("findings")):
         run_dir = fdir.parent
         fixture, strat = run_dir.parent.name, run_dir.name
-        phase_rep = run_dir.parent.parent.name + "/" + run_dir.parent.name
+        phase_rep = (run_dir.parent.parent.parent.name + "/"
+                     + run_dir.parent.parent.name + "/" + run_dir.parent.name)
         tp, fp, hits, misses = score_fixture(fixture, run_dir)
         groups.setdefault((phase_rep, fixture, strat), []).append((tp, fp, hits, misses))
     for (phase_rep, fixture, strat), rows in sorted(groups.items()):

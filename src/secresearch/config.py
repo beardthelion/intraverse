@@ -16,6 +16,7 @@ DEFAULT_WEIGHTS = {
     "authz_boundary_crossing": 0.07,
     "insufficient_validation": 0.06,
     "guard_bypassable": 0.15,
+    "unintended_use": 0.15,
     "state_manipulation": 0.02,
 }
 

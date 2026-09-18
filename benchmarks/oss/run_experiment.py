@@ -49,7 +49,7 @@ def append(row: dict) -> None:
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("phase", choices=["stub", "devin"])
+    ap.add_argument("phase", choices=["stub", "devin", "stub-uu"])
     args = ap.parse_args()
 
     # per-fixture budgets: paths must outnumber picks for ranking to matter
@@ -67,7 +67,14 @@ def main() -> None:
               f"FP={m['false_positives']} missed={m['missed']} "
               f"jev_fail={m.get('jev_failures', 0)}", flush=True)
 
-    if args.phase == "stub":
+    if args.phase == "stub-uu":
+        # unintended_use dimension only affects jev scoring; heuristics are
+        # identical to the stub phase and need no rerun
+        for rep in range(5):
+            go("whoogle-ssrf", "jev", "stub", 0, rep)
+        for rep in range(3):
+            go("alerta-sqli", "jev", "stub", 0, rep)
+    elif args.phase == "stub":
         for rep in range(5):
             go("whoogle-ssrf", "jev", "stub", 0, rep)
         for rep in range(3):

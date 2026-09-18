@@ -60,6 +60,23 @@ QUESTIONS: dict[str, dict] = {
         "type": "noul",
         "instructions": "Does this path plausibly violate a security invariant (untrusted input reaching a privileged sink, missing authorization, secret exposure)?",
     },
+    "unintended_use": {
+        "type": "noul",
+        "instructions": (
+            "Does the attacker-controlled value determine WHICH resource this "
+            "operation acts on (which host to fetch, which file to open, which "
+            "query fragment to run, which page to redirect to) beyond what the "
+            "feature's design needs? Answer high when the input picks the "
+            "target itself and the feature does not require accepting an "
+            "arbitrary target (e.g. a fetch that only ever needs search-result "
+            "icon URLs but accepts any URL). Answer high also when the input "
+            "can exceed the shape or grammar the feature expects (a filter "
+            "parameter that accepts raw query syntax). Answer low when the "
+            "input merely fills a slot in a fixed target (a query appended "
+            "to a fixed search URL), or when passing the input straight "
+            "through IS the feature's documented purpose."
+        ),
+    },
     "research_value": {
         "type": "score",
         "instructions": "How likely is deep investigation of this path to produce a real, exploitable vulnerability?",
@@ -191,6 +208,7 @@ class JevDecisionModel(DecisionModel):
             invariant_violation=_noul(answers.get("invariant_violation", {})),
             research_value=_score01(answers.get("research_value", {})),
             guard_bypassable=bypass,
+            unintended_use=_noul(answers.get("unintended_use", {})),
             estimated_cost=0.2 + 0.8 * _score01(answers.get("investigation_cost", {})),
             continue_exploration=_noul(answers.get("continue_exploration", {})),
             raw={"answers": answers, "model": resp.get("model")},

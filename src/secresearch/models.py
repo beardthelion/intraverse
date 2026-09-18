@@ -198,6 +198,10 @@ class PathScores:
     insufficient_validation: float = 0.0
     research_value: float = 0.0
     guard_bypassable: float = 0.0  # P(guard on this path can be bypassed)
+    # P(input controls something the feature does not need: which host to
+    # fetch, which file to open, which query to run — vs. content the
+    # feature exists to pass through)
+    unintended_use: float = 0.0
     estimated_cost: float = 1.0
     continue_exploration: float = 0.5
     raw: dict[str, Any] = field(default_factory=dict)
