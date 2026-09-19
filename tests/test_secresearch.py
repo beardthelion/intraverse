@@ -838,6 +838,54 @@ class TestSinkInput(unittest.TestCase):
         self.assertEqual(si["base"], "https://b.example/")
         self.assertTrue(si["scheme_control"])
 
+    def _callee_states(self):
+        # whoogle shape: a shared send() whose arg mixes a base with a
+        # query; which parameter carries the path's taint decides whether
+        # the attacker names the scheme (base_url) or only the tail
+        from secresearch.decision.base import path_state
+        graph, paths = analyze_src({
+            "a.py": (
+                "import requests\n"
+                "BASE = 'https://search.example/'\n"
+                "def send(base_url, query):\n"
+                "    return requests.get((base_url or BASE) + query)\n"
+                "from http.server import BaseHTTPRequestHandler\n"
+                "class H(BaseHTTPRequestHandler):\n"
+                "    def do_GET(self):\n"
+                "        u = self.path\n"
+                "        send(base_url=u)\n"
+                "class H2(BaseHTTPRequestHandler):\n"
+                "    def do_POST(self):\n"
+                "        q = self.path\n"
+                "        send(base_url=BASE, query=q)\n"
+            ),
+        })
+        checker = InvariantChecker(graph)
+        out = []
+        for p in paths:
+            if graph.nodes[p.nodes[-1]].attrs.get("vuln") \
+                    != "outbound_request":
+                continue
+            st = path_state(p, graph, checker)
+            out.append(([h["label"] for h in st["hops"]], st))
+        return out
+
+    def test_callsite_taint_names_base_param(self):
+        # send(base_url=u): the attacker value lands at position 0 of the
+        # fetched URI, so scheme control holds (the /element CVE shape)
+        si = next(s["sink_input"] for labels, s in self._callee_states()
+                  if "HTTP GET" in labels)
+        self.assertEqual(si["constraint"], "expression")
+        self.assertTrue(si["scheme_control"])
+
+    def test_callsite_const_base_pins_scheme(self):
+        # send(base_url=BASE, query=q): taint enters through query only,
+        # so the fetched URI's prefix is fixed (the /search shape)
+        si = next(s["sink_input"] for labels, s in self._callee_states()
+                  if "HTTP POST" in labels)
+        self.assertEqual(si["constraint"], "prefix_expr")
+        self.assertFalse(si["scheme_control"])
+
 
 class TestConfigDefaults(unittest.TestCase):
     def test_max_paths_matches_generator_default(self):

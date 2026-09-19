@@ -71,11 +71,9 @@ def _load_names(stmt: ast.stmt) -> list[tuple[int, str]]:
     return out
 
 
-def _fn_tree(graph: CodeGraph, file: str, line: int,
-             src: list[str] | None):
-    """(tree, line offset) of the parsed segment of the innermost function
-    containing ``file:line``, or (None, 0)."""
-    fn = min(
+def _fn_node(graph: CodeGraph, file: str, line: int):
+    """Innermost function-ish node containing ``file:line``, or None."""
+    return min(
         (f for f in graph.nodes_of_type(
             NodeType.FUNCTION, NodeType.HTTP_ENTRY, NodeType.CLI_ENTRY,
             NodeType.EVENT_CONSUMER)
@@ -85,6 +83,13 @@ def _fn_tree(graph: CodeGraph, file: str, line: int,
         key=lambda f: (f.location.line_end or f.location.line_start)
                       - f.location.line_start,
         default=None)
+
+
+def _fn_tree(graph: CodeGraph, file: str, line: int,
+             src: list[str] | None):
+    """(tree, line offset) of the parsed segment of the innermost function
+    containing ``file:line``, or (None, 0)."""
+    fn = _fn_node(graph, file, line)
     if fn is None or not src:
         return None, 0
     end = min(fn.location.line_end or line, len(src))
@@ -223,14 +228,90 @@ _TARGET_KWARGS = {"url", "uri", "path", "file", "filename", "target",
                   "host", "addr", "address", "dest", "endpoint"}
 
 
+def _leading_segment(node: ast.AST) -> ast.AST | None:
+    """Leftmost operand of a concat chain or f-string: the part of the
+    result string that determines position 0, hence the URI scheme."""
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        return _leading_segment(node.left)
+    if isinstance(node, ast.JoinedStr):
+        return node.values[0] if node.values else None
+    if isinstance(node, ast.Call):
+        f = node.func
+        if isinstance(f, ast.Attribute) and f.attr == "format":
+            return _leading_segment(f.value)
+    return node
+
+
+def _seg_tainted(node: ast.AST, tainted: set[str], params: set[str],
+                 consts: dict[str, str], stored: set[str]) -> bool:
+    """True when a name in the segment could carry the attacker value:
+    a param tainted at this call site, a stored attr the analyzer marked
+    user-written, or a local nothing proves fixed. Module constants,
+    untainted params, and plain attributes count as fixed."""
+    for n in ast.walk(node):
+        if isinstance(n, ast.Name):
+            if n.id in consts:
+                continue
+            if n.id in params and n.id not in tainted:
+                continue
+            return True
+        if isinstance(n, ast.Attribute) and _dotted(n) in stored:
+            return True
+    return False
+
+
+def _callsite_tainted(code: str, fn_short: str, params: list[str],
+                      caller_consts: dict[str, str]) -> set[str] | None:
+    """Callee params that received a non-fixed value at this call site:
+    `send(base_url=u)` marks base_url; `send(base_url=CONST, query=q)`
+    marks only query. None when the call cannot be found."""
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return None
+    call = next(
+        (c for c in ast.walk(tree)
+         if isinstance(c, ast.Call)
+         and _dotted(c.func).rsplit(".", 1)[-1] == fn_short),
+        None)
+    if call is None:
+        return None
+    bound: dict[str, ast.expr] = {}
+    plist = [p for p in params if p != "self"]
+    for i, a in enumerate(call.args):
+        if i < len(plist):
+            bound[plist[i]] = a
+    for kw in call.keywords:
+        if kw.arg:
+            bound[kw.arg] = kw.value
+    return {p for p, v in bound.items()
+            if not isinstance(v, ast.Constant)
+            and not (isinstance(v, ast.Name) and v.id in caller_consts)}
+
+
+def _module_consts(src: list[str] | None) -> dict[str, str]:
+    consts = {}
+    for l in src or []:
+        if l and not l[0].isspace():
+            m = re.match(
+                r"([A-Za-z_][A-Za-z0-9_]*)\s*=\s*\(?\s*(['\"][^'\"]*['\"])",
+                l)
+            if m:
+                consts[m.group(1)] = m.group(2).strip("'\"")
+    return consts
+
+
 def _sink_input(sink_hop: dict, call_name: str, graph: CodeGraph,
-                src: list[str] | None,
-                guards: list[dict]) -> dict | None:
-    """What the sink's target argument can name. A bare variable leaves
-    the resource attacker-chosen; a literal prefix or an allowlist/gate
-    check on the same subject pins it. ``scheme_control`` is false only
-    when the effective prefix pins a ``scheme:`` designator; urljoin keeps
-    it true because an absolute URI overrides the base."""
+                src: list[str] | None, guards: list[dict],
+                call_site: str | None = None,
+                call_site_src: list[str] | None = None,
+                sink_node=None) -> dict | None:
+    """What the sink's target argument can name. The resource is attacker-
+    chosen only when a tainted value reaches string position 0: a bare
+    tainted name, or the leading segment of a concat/f-string. A literal
+    or non-tainted leading segment pins it; allowlist and sink-gating
+    checks on the same subject pin further; urljoin keeps scheme_control
+    true because an absolute URI overrides the base."""
     tree, off = _fn_tree(graph, sink_hop["file"], sink_hop["line"], src)
     if tree is None:
         return None
@@ -248,13 +329,22 @@ def _sink_input(sink_hop: dict, call_name: str, graph: CodeGraph,
     arg = kw.value if kw else (call.args[0] if call.args else None)
     if arg is None:
         return None
-    consts = {}
-    for l in src or []:
-        if l and not l[0].isspace():
-            m = re.match(r"([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(['\"].*['\"])",
-                         l)
-            if m:
-                consts[m.group(1)] = m.group(2).strip("'\"")
+    consts = _module_consts(src)
+    fn = _fn_node(graph, sink_hop["file"], sink_hop["line"])
+    params = list(fn.attrs.get("params", [])) if fn else []
+    tainted = set(fn.attrs.get("tainted_params", [])) if fn else set()
+    if call_site and fn:
+        code = call_site.split(": ", 1)[-1]
+        per_path = _callsite_tainted(
+            code, fn.label.rstrip("()").rsplit(".", 1)[-1],
+            params, _module_consts(call_site_src))
+        if per_path is not None:
+            tainted = per_path
+    stored = {l.split(":", 1)[1] for l in
+              (sink_node.attrs.get("tainted_labels", []) if sink_node
+               else [])
+              if l.startswith("user-stored:")}
+    pset = set(params)
     out: dict[str, Any] = {
         "arg": kw.arg if kw else "arg0",
         "expr": ast.unparse(arg)}
@@ -266,14 +356,25 @@ def _sink_input(sink_hop: dict, call_name: str, graph: CodeGraph,
         base = _literal_prefix(arg.args[0], consts) if arg.args else None
         if base:
             out["base"] = base
+    elif isinstance(arg, (ast.Name, ast.Attribute, ast.Subscript)):
+        out["constraint"] = (
+            "unconstrained" if _seg_tainted(
+                arg, tainted, pset, consts, stored) else "fixed")
     else:
-        prefix = _literal_prefix(arg, consts)
-        if prefix:
-            out["constraint"], out["prefix"] = "prefix", prefix
-        elif isinstance(arg, (ast.Name, ast.Attribute, ast.Subscript)):
-            out["constraint"] = "unconstrained"
-        else:
+        leading = _leading_segment(arg)
+        if isinstance(leading, ast.Constant) and leading.value:
+            out["constraint"], out["prefix"] = (
+                "prefix", str(leading.value))
+        elif isinstance(leading, ast.Name) and leading.id in consts:
+            out["constraint"], out["prefix"] = (
+                "prefix", consts[leading.id])
+        elif leading is not None and _seg_tainted(
+                leading, tainted, pset, consts, stored):
             out["constraint"] = "expression"
+        else:
+            out["constraint"] = "prefix_expr"
+            if leading is not None:
+                out["prefix_expr"] = ast.unparse(leading)
     root = _subject_root(out["expr"])
     # A check pins the argument when it is an allowlist on the same
     # subject, or when the sink sits in the check's true-branch: either
@@ -290,11 +391,11 @@ def _sink_input(sink_hop: dict, call_name: str, graph: CodeGraph,
         out["pinned"] = pinned
     if out["constraint"] == "literal":
         out["scheme_control"] = False
+    elif pinned:
+        out["scheme_control"] = ":" not in pinned[0]
     else:
-        # urljoin's base is excluded: an absolute URI overrides it, so
-        # only a guard-pin or a literal arg prefix can fix the scheme
-        effective = out.get("prefix") or (pinned[0] if pinned else "")
-        out["scheme_control"] = ":" not in effective
+        out["scheme_control"] = out["constraint"] in {
+            "unconstrained", "expression", "urljoin"}
     return out
 
 
@@ -389,18 +490,26 @@ def path_state(path: AttackPath, graph: CodeGraph, checker: InvariantChecker,
             hi = min(len(src), h["line"] + excerpt_lines)
             excerpt = "\n".join(f"{i+1}: {src[i]}" for i in range(lo, hi))
         hop = {**h, "code": excerpt}
-        # Include the call-site line for the next hop so the model can see
-        # which argument carried taint across the edge (e.g. send(base_url=q)
-        # vs send(base_url=FIXED, query=q)).
+        # Include the call-site lines for the next hop so the model can
+        # see which argument carried taint across the edge (e.g.
+        # send(base_url=q) vs send(base_url=FIXED, query=q)). Reads ahead
+        # until parentheses balance so multi-line calls stay parseable.
         if i + 1 < len(node_ids):
             for e in graph.out_edges(node_ids[i], EdgeType.CALLS):
                 if e.dst == node_ids[i + 1]:
                     csrc = read_lines(e.location.file)
                     ln = e.location.line_start - 1
                     if csrc and 0 <= ln < len(csrc):
+                        code = csrc[ln].strip()
+                        depth = code.count("(") - code.count(")")
+                        j = ln + 1
+                        while depth > 0 and j < len(csrc) and j < ln + 8:
+                            code += " " + csrc[j].strip()
+                            depth = code.count("(") - code.count(")")
+                            j += 1
                         hop["call_site"] = (
                             f"{e.location.file}:{e.location.line_start}: "
-                            f"{csrc[ln].strip()}")
+                            f"{code}")
                     break
         hops.append(hop)
     funcs = {
@@ -463,9 +572,17 @@ def path_state(path: AttackPath, graph: CodeGraph, checker: InvariantChecker,
     if sink_hop:
         post_sink = _post_sink_lines(
             sink_hop, graph, read_lines(sink_hop["file"]))
+        call_site = next(
+            (h["call_site"] for h in reversed(hops)
+             if h.get("call_site")), None)
+        cs_file = (call_site.split(": ", 1)[0].rsplit(":", 1)[0]
+                   if call_site else None)
         sink_input = _sink_input(
             sink_hop, feats["sink_call"], graph,
-            read_lines(sink_hop["file"]), guards)
+            read_lines(sink_hop["file"]), guards,
+            call_site=call_site,
+            call_site_src=read_lines(cs_file) if cs_file else None,
+            sink_node=checker.sink_node(path))
     state = {
         "path_id": path.id,
         "hypothesis": path.hypothesis,

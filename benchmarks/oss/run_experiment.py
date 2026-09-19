@@ -49,7 +49,7 @@ def append(row: dict) -> None:
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("phase", choices=["stub", "devin", "stub-uu", "stub2", "stub3", "stub4"])
+    ap.add_argument("phase", choices=["stub", "devin", "stub-uu", "stub2", "stub3", "stub4", "stub5"])
     args = ap.parse_args()
 
     # per-fixture budgets: paths must outnumber picks for ranking to matter
@@ -67,7 +67,20 @@ def main() -> None:
               f"FP={m['false_positives']} missed={m['missed']} "
               f"jev_fail={m.get('jev_failures', 0)}", flush=True)
 
-    if args.phase == "stub4":
+    if args.phase == "stub5":
+        # sink_input reach semantics: call-site-aware scheme_control splits
+        # attacker-named fetch targets (expression, sc=true) from pinned
+        # ones (prefix_expr/literal, sc=false). cdio jev x5 primary;
+        # whoogle jev x5 checks whether element/window CVE picks recover
+        # now that their base_url= call sites read sc=true while the
+        # search/autocomplete fetches read sc=false; alerta x3 regression.
+        for rep in range(5):
+            go("cdio-lfr", "jev", "stub", 0, rep)
+        for rep in range(5):
+            go("whoogle-ssrf", "jev", "stub", 0, rep)
+        for rep in range(3):
+            go("alerta-sqli", "jev", "stub", 0, rep)
+    elif args.phase == "stub4":
         # sink_reach dimension (weight 0.15, post-sink lines in path_state):
         # asks what the sink reaches or returns when the shown checks fail
         # and where the result goes. cdio jev x5 is the primary measurement;

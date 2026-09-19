@@ -518,6 +518,67 @@ remaining dilution is aggregation: whether a sharper ranker needs
 a bigger weight on reach or fewer confounded dimensions is a
 weighting question, not a perception one.
 
+### Call-site-aware reach (whoogle generalization check)
+
+The first version of `sink_input` classified only the sink's local
+argument expression, and on whoogle that expression is the same
+for every caller: `requests.get((base_url or self.search_url) +
+query)` inside `Request.send`. Whether the attacker names the
+scheme depends on *which parameter the path's taint enters*:
+`send(base_url=src_url)` on `/element` puts the attacker value at
+string position 0 (the SSRF), while `send(query=full_query)` and
+`send(base_url=AUTOCOMPLETE_URL, ...)` leave it in the tail.
+
+`sink_input` now derives per-path tainted params from the path's
+last CALLS-edge call site (parsed with paren balancing so
+multi-line calls stay readable; non-fixed values mark the param,
+module constants and literals do not), falling back to the
+callee's merged `tainted_params` when no call site exists. The arg
+expression is then decomposed at the leading segment:
+position 0 attacker-influenced means `expression`/`unconstrained`
+with scheme_control true; a literal, module constant, or
+non-tainted leading expression (`prefix_expr`) means
+scheme_control false.
+
+Measured on whoogle's five outbound_request paths:
+
+| path | call site | sink_input |
+|------|-----------|------------|
+| `/element` CVE (`request.args.get`) | `send(base_url=src_url)` | expression, sc=true |
+| `/window` CVE (`request.args.get`) | `send(base_url=target_url)` | expression, sc=true |
+| `/search` (`HTTP search`) | `send(query=full_query, ...)` | prefix_expr, sc=false |
+| autocomplete (`http.request`) | `send(base_url=AUTOCOMPLETE_URL, ...)` | prefix_expr, sc=false |
+| env config (`os.environ`) | — | expression, sc=true |
+
+Jev probe (2 reps): `sink_reach` 0.80 on `/element` vs 0.44-0.48
+(`/search`) and 0.48-0.51 (autocomplete) — the same ~0.3
+separation as cdio, via the same mechanism, on a different code
+shape. The composite again does not flip pairwise (autocomplete
+2.14-2.17 vs CVE 1.94-1.98 on other dimensions), but the
+dimension now carries a true, load-bearing fact on two fixtures.
+On alerta the raw_query sinks read `unconstrained` — honest for
+SQL, where there is no scheme to pin.
+
+### stub5 sweep (harness confirmation)
+
+| fixture | n | TP | pick detail |
+|---------|---|----|-------------|
+| cdio-lfr jev | 5 | 3 | CVE-variant picked at positions 8/10/11 of 12 in the hits; the picked shape is `self.watch -> call_browser() -> run@requests` — the browser-fetcher route to the same requests.py sink |
+| whoogle-ssrf jev | 5 | 4,4,4,3,3 | picks are the /config vuln family (open/redirect/deser, all in truth); element/window SSRF never picked — composite ~1.95 sits below the config family's ~2.0+ despite sr=0.80 |
+| alerta-sqli jev | 3 | 2,1,1 | unchanged from prior phases |
+
+Reading: the dimension-level separation measured in the probes is
+real, and on cdio it translates to picks inside budget in 3 of 5
+draws (the CVE straddles the line). On whoogle it does not
+translate: the /config family is genuinely vulnerable *and*
+scores high on the other dimensions, so the SSRF paths' composite
+stays under the cut even though `sink_reach` correctly separates
+them from the pinned fetches. The honest summary after three
+levers: `sink_reach` now carries true discriminating facts
+(provenance, check content, reach) and the model scores them
+correctly — what still fails is that one dimension at weight
+0.15 cannot outvote several confounded ones at the pick line.
+
 ## Conclusions
 
 1. **Did Jev improve path selection?** Yes, measurably, once candidates
@@ -591,11 +652,20 @@ weighting question, not a perception one.
    siblings) and moved the CVE rank from 12 to 9 of 118, inside
    budget with margin; the paths still ahead are a legitimately
    reach-dangerous `open()` class, not the safe pinned fetches.
-   (g) Next levers: composite weighting (the separating dimension
-   carries only 0.15 of value; the pairwise order still favors
-   pinned siblings), a second mid-size fixture to test whether
-   scheme_control generalizes beyond this CVE shape, and a larger
-   devin ablation (n>=5) once per-run cost is tolerable.
+   (g) Done: call-site-aware reach generalized `scheme_control` to
+   whoogle's shared-sink shape — `send(base_url=src_url)` reads
+   sc=true where `send(query=...)` and `send(base_url=CONST)`
+   read sc=false — and the stub5 sweep confirmed the harness sees
+   it too: cdio picked a CVE variant in 3/5 draws at positions
+   8-11 of 12, whoogle's /config family took 4-5 of 6 picks (all
+   true positives) while element/window stayed unpicked because
+   their composite, not their sink_reach, trails. The persistent
+   pattern across levers: the separating signal exists at the
+   dimension level and loses at the composite level. (h) Next
+   levers: composite weighting sensitivity (how much weight on
+   reach before the pick line flips — record, don't tune), the
+   n-rep question for whoogle's earlier 4/5 -> 0/3 flip, and a
+   larger devin ablation once per-run cost is tolerable.
 
 7. **Methodological note.** "Verified TP" confounds ranker and investigator
    quality: the gb reruns have identical Jev picks under stub and devin, but
