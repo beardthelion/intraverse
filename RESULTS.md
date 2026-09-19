@@ -92,7 +92,7 @@ generator happens to place vulns early, inflating its raw numbers. Treat it
 as a floor, not a competitor.
 
 The interesting part is what Jev picked: its 14 selections were almost all
-paths with *no visible guard* — the 10 unguarded vulns plus the invisible-
+paths with *no visible guard*, the 10 unguarded vulns plus the invisible-
 guard/bounded traps. It skipped every parameterized query, `shlex.quote`,
 `basename`, and real-allowlist decoy. Its high FP count is a validator
 artifact: stub+static-proof cannot see `isalnum()`/`len()`/`sha256()` as
@@ -110,7 +110,7 @@ static     2.0 [2-2]      4.5 [3-6]  42%
 With a real investigator the ranking gap widens: Jev-guided selection gave
 devin 2x the verified TPs and ~9x fewer FPs than static. Devin falsified the
 bounded-transform traps correctly (FP collapse vs stub's 7.8) and expanded
-the graph with agent-suggested paths — rep1's finding-5 (pickle.loads, r010)
+the graph with agent-suggested paths, rep1's finding-5 (pickle.loads, r010)
 was reached only through such an expansion. Its weakness: `uncertain` on
 several unambiguous vulns (it reasons about deployment context, e.g. whether
 loopback binding matters), stalling paths under a fixed budget.
@@ -118,7 +118,7 @@ loopback binding matters), stalling paths under a fixed budget.
 The six bypassable-guard vulns were picked 35 times across all 30 runs
 (mostly random/baseline ordering) and the stub falsified every one; under
 devin neither ranker put them in the top 12. "Guard present" dominates both
-scorers even when the guard is bypassable — the systematic blind spot this
+scorers even when the guard is bypassable, the systematic blind spot this
 experiment exposed.
 
 ## Guard-bypass scoring experiment
@@ -132,7 +132,7 @@ naming a concrete bypass.
 
 Effect on ranking (single scoring pass over all 58 paths): the six hard
 vulns moved from ranks ~21-51 (all outside the 14-pick budget) to ranks
-2, 3, 6, 7, 10, 29 — five inside budget. Bypass scores on hards ran
+2, 3, 6, 7, 10, 29, five inside budget. Bypass scores on hards ran
 0.80-0.93 vs 0.0 on parameterized decoys. Residual noise: `os.path.basename`
 decoys still score 0.77-0.84 (Jev stays suspicious of basename), costing a
 few picks.
@@ -155,7 +155,7 @@ from 0) and selection precision rose in both settings. Under the stub,
 verified TP *drops* (1.9 vs 6.2): the stub falsifies every guarded path it
 is handed, so better ranking just spends more budget on paths the stub
 cannot judge. Under devin the same selections convert: TP 4.5 -> 7.5 with
-zero FPs — devin confirmed 5 of the 6 bypassable-guard vulns per rep,
+zero FPs, devin confirmed 5 of the 6 bypassable-guard vulns per rep,
 including the `localhost`-allowlist SSRF, the `|`-only command blacklist,
 and the quote-stripping SQLi.
 
@@ -179,7 +179,7 @@ on both repos.
 **Scoring caveat found on real code.** Sink-line truth matching is unsound
 when many flows share a helper: 5 whoogle paths converge on
 `requests.get` @request.py:339 and every alerta query funnels through the
-same `cursor.execute` helpers. Naive matching scored static alerta TP=2 —
+same `cursor.execute` helpers. Naive matching scored static alerta TP=2 , 
 route-aware scoring (`benchmarks/oss/score.py`, a finding counts only if
 its *entry* is a genuinely vulnerable endpoint) revises that to TP=0.
 
@@ -198,31 +198,31 @@ whoogle-ssrf  baseline   2   3.0        3.0        CVE paths: 0
 
 **What it means.** On alerta, Jev put the real CVE flows (`/_bulk/alerts`,
 `/keys`) in the top 12 every rep while static actively anti-selected them
-(0/12) — but random matched Jev because ~40% of alerta's paths are vuln
+(0/12), but random matched Jev because ~40% of alerta's paths are vuln
 routes, so density does the work for chance. On whoogle, no ranker found
 the actual CVE: element/window ranked 7-8 of 11, just under the 6-pick
 budget. Adding call-site excerpts to the state (so the model sees
 `send(base_url=src_url)` vs `send(base_url=FIXED, query=q)`) moved them
 up one rank but not across the line. Devin confirmed the element SSRF in
-91s when handed the path directly — the miss is ranker-side.
+91s when handed the path directly, the miss is ranker-side.
 
 The limiting signal is semantic: "user input reaches a fetch" scores high
 whether the fetch is intended (autocomplete, rank 3) or arbitrary
 (element SSRF, rank 7). Distinguishing intended from unintended use is the
-frontier — the imgres endpoint, whose *purpose* is redirecting, ranked #1
+frontier, the imgres endpoint, whose *purpose* is redirecting, ranked #1
 of 11 as open_redirect.
 
 ### unintended_use dimension (phase stub-uu)
 
 A fourth score, `unintended_use` (weight 0.15), asks whether the
 attacker-controlled value determines *which* resource the operation acts
-on beyond what the feature's design needs — high for "input picks the
+on beyond what the feature's design needs, high for "input picks the
 target" or "input can exceed the expected grammar", low for "input fills
 a slot in a fixed target" or "passthrough is the feature's purpose".
 
 Scores on whoogle: element/window SSRF 0.82-0.83, autocomplete 0.13,
 search 0.26, imgres 0.90 (defensible: it IS an open redirect). On
-alerta's vuln routes it scored only 0.16-0.48 — `q=` is a designed input
+alerta's vuln routes it scored only 0.16-0.48, `q=` is a designed input
 slot, so the dimension does not boost them and the added weight slightly
 dilutes the other signals.
 
@@ -248,20 +248,20 @@ it was built for.
 
 Third fixture: **changedetection.io** @ 0.48.04 (GHSA-j5vv-6wjg-cfr8,
 LFR via bypassable `file:` URI check on the stored watch URL): 110
-candidate paths, ONE sparse CVE, budget 12 — the sparsest test yet.
+candidate paths, ONE sparse CVE, budget 12, the sparsest test yet.
 
 Getting the CVE to enumerate required real analyzer work, each piece
 necessary on real code:
 
 - **Stored (second-order) taint**: the vulnerable value is
-  `self.watch.link` — user input persisted in the datastore and read
+  `self.watch.link`, user input persisted in the datastore and read
   back later by an async worker. `self.<attr>` reads are now sources
   when the attr was assigned from a store-backed expression
   (`self.x = f(self.datastore...)`, plus always-on datastore/db/store/
   cache/backend attr names).
 - **Qualname collision bug**: `Class.method` qualnames have no module
   path, so four `fetcher.run` implementations silently overwrote each
-  other — on a 131-file repo many functions were simply absent.
+  other, on a 131-file repo many functions were simply absent.
   Collisions now get `@filestem` suffixes.
 - **Polymorphic dispatch**: `self.fetcher.run` resolves via the declared
   type (`self.fetcher = Fetcher()`) to ALL concrete subclass impls
@@ -313,8 +313,8 @@ user-written" was invisible to Jev. This round adds provenance tracking:
 
 - Tainted writes into store-rooted objects (`self.__data[uuid] =
   new_watch`, `datastore.add_watch(url=...)`, `s.update(tainted)`)
-  mark the root user-written. Stored reads of that root — or of attrs
-  assigned from it (`self.watch = self.datastore...`) — emit
+  mark the root user-written. Stored reads of that root, or of attrs
+  assigned from it (`self.watch = self.datastore...`), emit
   `user-stored:self.x` labels, so the path's source reads as
   attacker-written, not feature-internal.
 - Container-shaped writes (`self.x[k] = v`, `self.x.update(v)` on
@@ -340,7 +340,7 @@ Two honest reads:
 1. **Provenance moved the label, not the ordering.** In a manual
    full-pool pass (118 paths) the CVE variant scored ~19-20, still
    short of budget. In the actual runs the `self.watch` variant never
-   enumerated at all — `ScanConfig.max_paths=500` overrode the
+   enumerated at all, `ScanConfig.max_paths=500` overrode the
    generator's raised cap, so the run pool had 73 paths and the
    self.watch source never reached it (see stub4 for the fix and the
    measured effect). Provenance lifted the *entire stored class*: the
@@ -385,7 +385,7 @@ to the sweep.
 
 **A measurement bug surfaced first.** The stub4 sweep initially ran
 the same miss as stub3 (0/5), and a full-pool rank pass put the CVE
-at rank 6 of 118 — a contradiction that exposed it: benchmark runs
+at rank 6 of 118, a contradiction that exposed it: benchmark runs
 generated 73 paths, not 118. `ScanConfig.max_paths=500` overrode the
 generator's raised cap, so every run since stub2 truncated the pool
 and the `self.watch` variant never enumerated in ANY run. The
@@ -497,11 +497,11 @@ Measured effect (direct probe, 2 reps, then one full-pool pass):
 
 The question needed one sharpening: phrased as a soft conditional
 ("answer low when scheme_control is false AND the pin caps at a
-safe target"), siblings still scored 0.76-0.80 — the model judged
+safe target"), siblings still scored 0.76-0.80, the model judged
 the pinned endpoint's JSON-merge outcome as concrete anyway.
 Restated as a rule (scheme_control=false confines the URI to the
 pinned prefix; answer low even if the response is stored or
-parsed), the dimension separated >0.3, above the 0.2 bar — the
+parsed), the dimension separated >0.3, above the 0.2 bar, the
 first within-class separation on this fixture.
 
 The composite still does not flip pairwise: sink_reach carries
@@ -510,7 +510,7 @@ and the pinned siblings' other dimensions (gb 0.71-0.78, uu
 0.60-0.75, ac ~0.80) keep them at 2.23-2.40 vs the CVE's 2.10.
 What changed in the full-pool ranking is the *composition* above
 the cut: the paths now ahead of the CVE are stored-name `open()`
-file reads (sc=true, sr 0.71-0.80 — a genuinely reach-dangerous
+file reads (sc=true, sr 0.71-0.80, a genuinely reach-dangerous
 class), not its safe pinned-fetch twins. The rank moved from the
 budget boundary (12) inside it with margin (9). The state now
 carries the discriminating fact, the model scores it, and the
@@ -548,23 +548,23 @@ Measured on whoogle's five outbound_request paths:
 | `/window` CVE (`request.args.get`) | `send(base_url=target_url)` | expression, sc=true |
 | `/search` (`HTTP search`) | `send(query=full_query, ...)` | prefix_expr, sc=false |
 | autocomplete (`http.request`) | `send(base_url=AUTOCOMPLETE_URL, ...)` | prefix_expr, sc=false |
-| env config (`os.environ`) | — | expression, sc=true |
+| env config (`os.environ`) | n/a | expression, sc=true |
 
 Jev probe (2 reps): `sink_reach` 0.80 on `/element` vs 0.44-0.48
-(`/search`) and 0.48-0.51 (autocomplete) — the same ~0.3
+(`/search`) and 0.48-0.51 (autocomplete), the same ~0.3
 separation as cdio, via the same mechanism, on a different code
 shape. The composite again does not flip pairwise (autocomplete
 2.14-2.17 vs CVE 1.94-1.98 on other dimensions), but the
 dimension now carries a true, load-bearing fact on two fixtures.
-On alerta the raw_query sinks read `unconstrained` — honest for
+On alerta the raw_query sinks read `unconstrained`, honest for
 SQL, where there is no scheme to pin.
 
 ### stub5 sweep (harness confirmation)
 
 | fixture | n | TP | pick detail |
 |---------|---|----|-------------|
-| cdio-lfr jev | 5 | 3 | CVE-variant picked at positions 8/10/11 of 12 in the hits; the picked shape is `self.watch -> call_browser() -> run@requests` — the browser-fetcher route to the same requests.py sink |
-| whoogle-ssrf jev | 5 | 4,4,4,3,3 | picks are the /config vuln family (open/redirect/deser, all in truth); element/window SSRF never picked — composite ~1.95 sits below the config family's ~2.0+ despite sr=0.80 |
+| cdio-lfr jev | 5 | 3 | CVE-variant picked at positions 8/10/11 of 12 in the hits; the picked shape is `self.watch -> call_browser() -> run@requests`, the browser-fetcher route to the same requests.py sink |
+| whoogle-ssrf jev | 5 | 4,4,4,3,3 | picks are the /config vuln family (open/redirect/deser, all in truth); element/window SSRF never picked, composite ~1.95 sits below the config family's ~2.0+ despite sr=0.80 |
 | alerta-sqli jev | 3 | 2,1,1 | unchanged from prior phases |
 
 Reading: the dimension-level separation measured in the probes is
@@ -576,8 +576,53 @@ stays under the cut even though `sink_reach` correctly separates
 them from the pinned fetches. The honest summary after three
 levers: `sink_reach` now carries true discriminating facts
 (provenance, check content, reach) and the model scores them
-correctly — what still fails is that one dimension at weight
+correctly, what still fails is that one dimension at weight
 0.15 cannot outvote several confounded ones at the pick line.
+
+### Weight sensitivity: does aggregation lose what the dimension finds?
+
+Counterfactual ranking over stored per-dimension scores (one
+scoring pass per fixture, priorities recomputed at varying
+`sink_reach` weights):
+
+| fixture | w=0 | w=0.15 | w=0.3 | w=0.6 | w=1.0 |
+|---------|-----|--------|-------|-------|-------|
+| cdio CVE rank (budget 12) | 16 | 13 | 11 | 9 | 7 |
+| whoogle element/window rank (budget 6) | 11-13 | 10-12 | 10-11 | 9-11 | 9-10 |
+
+Three findings, none flattering to a simple fix:
+
+1. **cdio responds to weight but never orders cleanly.** ~0.3
+   puts the CVE inside budget, yet the pinned siblings stay
+   ahead at every weight, their `sink_reach` is mid (0.5-0.6),
+   not low, so the dimension separates "dangerous" from
+   "plausible" without producing "dangerous above safe".
+
+2. **whoogle does not respond at all.** The element/window paths
+   sit at rank 9-13 at every weight because the paths ahead
+   score HIGHER on `sink_reach` (0.65-0.83): `open()` and
+   `redirect()` on attacker input are legitimately high-reach
+   too, and 3-4 of them are real vulns in the truth file. The
+   CVE loses not on weight but on crowding by other
+   genuinely-dangerous flows.
+
+3. **The residual is a holistic-judgment gap, not aggregation.**
+   The whoogle SSRF paths score `research_value` 0.55-0.60 and
+   `invariant_violation` 0.63 while the config family scores
+   0.69-0.85 / 0.81-0.93, the model's broad "is this a real
+   vuln" answer prefers obvious file-access and deserialization
+   sinks over the subtler gated-SSRF shape, which reads as
+   "the feature fetching a URL behind a check". `sink_reach`
+   answers its narrow question correctly; the wide-angle
+   dimensions answer theirs plausibly-wrongly on exactly the
+   subtle vuln.
+
+So the aggregation story needs amending: on cdio, weight is the
+binding constraint and a modest increase suffices; on whoogle,
+no weight on the discriminating dimension helps because the
+crowd above is also correctly scored on it, the miss lives in
+`research_value`/`invariant_violation`, which reward the obvious
+vuln shape over the subtle one.
 
 ## Conclusions
 
@@ -591,19 +636,19 @@ correctly — what still fails is that one dimension at weight
 2. **Did it reduce expensive agent investigation?** Yes where it counts.
    Jev calls cost ~1s and ~$0.0001/fixture vs 30-150s per devin-cli call.
    Under the same investigation budget, Jev's picks converted to findings at
-   ~44% (stub) / 63% (devin) vs static's ~29%/42% — roughly half the wasted
+   ~44% (stub) / 63% (devin) vs static's ~29%/42%, roughly half the wasted
    agent calls per verified vuln.
 
 3. **Did it discover vulnerabilities the baseline missed?** After the
-   guard-bypass change, yes — including a class no ranker found before. With
+   guard-bypass change, yes, including a class no ranker found before. With
    guard definitions in the state and a `guard_bypassable` score, Jev put 5
    of the 6 bypassable-guard vulns inside the 14-pick budget (previously 0),
-   and devin+gb verified TP 7.5/run with FP 0 — the best result in the
+   and devin+gb verified TP 7.5/run with FP 0, the best result in the
    benchmark. The prerequisite was showing Jev the guard's *body*: scored on
    call sites alone it ranked the hards no better than before.
 
 4. **Where did Jev make incorrect predictions?** (a) It cannot distinguish
-   "tainted but bounded" (len/sha256/isalnum traps) from unguarded — it ranked
+   "tainted but bounded" (len/sha256/isalnum traps) from unguarded, it ranked
    all six traps high. Defensible: the graph shows no guard, so they ARE
    suspicious; the investigator layer is where they should die. (b) SSRF on
    vuln-heap straddled the budget cut across runs. (c) The earlier catastrophic
@@ -618,18 +663,18 @@ correctly — what still fails is that one dimension at weight
    precisely characterized: stub falsifies real vulns it cannot reason
    through (all 6 bypassable-guard vulns); devin reasons correctly but burns
    30-150s/call and stalls on epistemic caution ("uncertain" on unambiguous
-   injections). Second bottleneck: validator soundness — static proof
+   injections). Second bottleneck: validator soundness, static proof
    verifies paths whose guards it cannot see, turning ranker noise into FPs.
 
 6. **What experiment should run next?** (a) Done: intended-use scoring
    moved the whoogle CVE inside budget (4/5 reps) at a small cost on
    alerta. (b) Done: a mid-size sparse-CVE repo (cdio) showed the analyzer
-   was the bottleneck, then showed the ranker is too — stored-intended-
+   was the bottleneck, then showed the ranker is too, stored-intended-
    fetch vulns are the hardest class and NO ranker found it. (c) Done:
    store-write provenance made the source label truthful
    (`user-stored:self.watch`) and lifted the whole stored class, but the
    CVE path still scored ~19/118 in manual passes (and, it turned out,
-   was absent from run pools entirely) — the missing capability is now
+   was absent from run pools entirely), the missing capability is now
    discrimination *within* a uniformly-plausible class, not source
    identification. Devin confirmed the path when handed it (~10min on
    313 files), so the residual gap is ranking, not investigation.
@@ -643,9 +688,9 @@ correctly — what still fails is that one dimension at weight
    objects gave `guard_bypassable` the check's structure (subject,
    pattern, polarity, env gates). The CVE's bypass score rose ~0.11
    and its rank stabilized at 12/118, but the top of the pool is
-   still uniformly-plausible stored fetches — the lever sharpened
+   still uniformly-plausible stored fetches, the lever sharpened
    the signal without producing robust separation. (f) Done: reach
-   semantics — `sink_input` classifies the sink's target argument
+   semantics, `sink_input` classifies the sink's target argument
    and folds in same-subject allowlist/gate pins into a
    `scheme_control` verdict. It produced the first clean
    within-class separation (sink_reach 0.80 vs 0.46-0.55 on pinned
@@ -653,18 +698,26 @@ correctly — what still fails is that one dimension at weight
    budget with margin; the paths still ahead are a legitimately
    reach-dangerous `open()` class, not the safe pinned fetches.
    (g) Done: call-site-aware reach generalized `scheme_control` to
-   whoogle's shared-sink shape — `send(base_url=src_url)` reads
+   whoogle's shared-sink shape, `send(base_url=src_url)` reads
    sc=true where `send(query=...)` and `send(base_url=CONST)`
-   read sc=false — and the stub5 sweep confirmed the harness sees
+   read sc=false, and the stub5 sweep confirmed the harness sees
    it too: cdio picked a CVE variant in 3/5 draws at positions
    8-11 of 12, whoogle's /config family took 4-5 of 6 picks (all
    true positives) while element/window stayed unpicked because
    their composite, not their sink_reach, trails. The persistent
    pattern across levers: the separating signal exists at the
-   dimension level and loses at the composite level. (h) Next
-   levers: composite weighting sensitivity (how much weight on
-   reach before the pick line flips — record, don't tune), the
-   n-rep question for whoogle's earlier 4/5 -> 0/3 flip, and a
+   dimension level and loses at the composite level. (h) Done:
+   weight sensitivity over stored dimension
+   scores. On cdio ~0.3 weight puts the CVE inside budget but no
+   weight orders pinned-siblings below it; on whoogle no weight
+   helps at all, the paths ahead score higher on the
+   discriminating dimension itself, and the miss lives in
+   `research_value`/`invariant_violation` preferring obvious vuln
+   shapes. Aggregation was the story on cdio; holistic judgment
+   is the story on whoogle. (i) Next levers: the n-rep question
+   for whoogle's earlier 4/5 -> 0/3 flip (now largely explained , 
+   pool crowding plus holistic-score drift), a third fixture to
+   test whether subtle-shape under-scoring is general, and a
    larger devin ablation once per-run cost is tolerable.
 
 7. **Methodological note.** "Verified TP" confounds ranker and investigator
@@ -701,7 +754,7 @@ correctly — what still fails is that one dimension at weight
 - The generated corpus places easy vulns on early routes, which inflates the
   flat-ordering baseline's apparent precision; treat baseline as a floor.
 - Static proof cannot verify that a *dynamic* guard is effective, and cannot
-  see guards that are not sanitizer-named calls — both produce verified FPs.
+  see guards that are not sanitizer-named calls, both produce verified FPs.
 - Two validator/adapter bugs were found and fixed during this experiment
   (greedy JSON report regex, weak raw_query sandbox check, 503 retry); the
   earlier `jev score` rung-normalization fix is described above.
@@ -720,4 +773,4 @@ correctly — what still fails is that one dimension at weight
 - The `request` short-name sink matches any `x.request(...)`; plausible
   FPs on non-HTTP receivers.
 - Baseline's flat ordering is enumeration order, which is roughly source
-  order — early-file vulns flatter it (cdio: baseline TP=1 by position).
+  order, early-file vulns flatter it (cdio: baseline TP=1 by position).
