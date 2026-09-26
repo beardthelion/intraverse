@@ -49,7 +49,7 @@ def append(row: dict) -> None:
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("phase", choices=["stub", "devin", "stub-uu", "stub2", "stub3", "stub4", "stub5", "stub6"])
+    ap.add_argument("phase", choices=["stub", "devin", "stub-uu", "stub2", "stub3", "stub4", "stub5", "stub6", "devin2"])
     args = ap.parse_args()
 
     # per-fixture budgets: paths must outnumber picks for ranking to matter
@@ -68,7 +68,18 @@ def main() -> None:
               f"FP={m['false_positives']} missed={m['missed']} "
               f"jev_fail={m.get('jev_failures', 0)}", flush=True)
 
-    if args.phase == "stub6":
+    if args.phase == "devin2":
+        # devin ablation on the OSS fixtures: does a real investigator
+        # confirm what jev selects? calweb is the clean win under stub
+        # (5/5 picks); cdio straddles the line; whoogle is the crowded
+        # pool where the SSRF stays unpicked. 2 reps each.
+        for rep in range(2):
+            go("calweb-ssrf", "jev", "devin", 0, rep)
+        for rep in range(2):
+            go("cdio-lfr", "jev", "devin", 0, rep)
+        for rep in range(2):
+            go("whoogle-ssrf", "jev", "devin", 0, rep)
+    elif args.phase == "stub6":
         # calweb-ssrf (calibre-web 0.6.16, 67 paths, budget 10): tests
         # whether the holistic dimensions under-score the subtle shape:
         # a feature-intended cover fetch behind a bypassable '127.'

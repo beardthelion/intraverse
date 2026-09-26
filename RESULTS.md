@@ -735,6 +735,47 @@ again; the honest read is that whoogle's pick failure is
 crowding plus sink-shape bias in the holistic scores, and the
 measurable signal that remains is small.
 
+### devin ablation (phase devin2)
+
+Swapped the stub investigator for devin-cli, 2 jev reps each on
+calweb, cdio, and whoogle. The question: does a real investigator
+confirm what jev selects, and what does real verification do to
+the findings set?
+
+| fixture | stub (best phase) | devin x2 | picks discarded by devin |
+|---------|-------------------|----------|--------------------------|
+| calweb  | 5/5 TP, FP 7      | TP=1 FP=6; TP=1 FP=5 | 2/9, 2/8 |
+| cdio    | 3/5 TP, FP 11-12  | TP=1 FP=4; TP=1 FP=3 | 4/9, 5/9 |
+| whoogle | TP 3-4, FP 2-3    | TP=3 FP=1; TP=4 FP=1 | 0/4, 0/5 |
+
+Three findings.
+
+1. Selection quality holds up. All 6 reps produced at least one
+   TP, and the CVE was picked and verified on every calweb and
+   cdio rep (cdio went 2/2 under devin vs 3/5 under stub, small n
+   but the real investigator did not hurt). Devin's evidence for
+   the calweb CVE explicitly traces `cover_url` through
+   `save_cover_from_url` to `requests.get`.
+
+2. Verification does real work. Under stub every pick
+   auto-verifies, so stub FP counts every non-truth pick. Devin
+   discarded roughly a quarter of calweb's picks and roughly half
+   of cdio's; discarded picks never become findings, which is why
+   cdio FP fell from 11-12 to 3-4. Whoogle saw zero discards: its
+   picks are the config family, the most mechanically verifiable
+   vulns in the pool. The honest read is that stub FP overstates
+   what a real pipeline emits, and the verifier, not the ranker,
+   owns most of the FP reduction.
+
+3. Investigation cannot rescue a selection miss. whoogle's
+   element/window SSRF stayed unpicked under devin for the same
+   reason as under stub: it never reaches the investigation
+   budget. The crowding diagnosis stands; the investigator only
+   sees what the ranker selects.
+
+One caveat: cdio rep1 had jev_fail=8 (scoring calls failed
+mid-run) and the CVE was still picked and verified.
+
 ## Conclusions
 
 1. **Did Jev improve path selection?** Yes, measurably, once candidates
@@ -851,13 +892,20 @@ measurable signal that remains is small.
    rv scores sink shape, not contract safety (intended imgres
    redirect tops the pool at 0.93), and whoogle's pick failure
    is crowding among ~9 plausible paths, not a single
-   mis-scored fact. (l) Remaining levers: a dedicated
+   mis-scored fact. (l) Done: the devin ablation (2 jev reps per
+   fixture, devin-cli investigator) confirmed selection quality:
+   6/6 reps produced at least one TP, cdio went 2/2, and real
+   verification discarded ~half of cdio's picks and ~a quarter
+   of calweb's, showing stub FP overstates what a real pipeline
+   emits. It also confirmed the boundary: whoogle's element/window
+   stayed unpicked because the investigator only sees what the
+   ranker selects. Remaining lever: a dedicated
    contract-unsafety dimension (uncertain payoff given the
-   weight-sensitivity result) and the devin ablation once
-   per-run cost is tolerable. The honest interim verdict: jev's
+   weight-sensitivity result). The honest interim verdict: jev's
    wins are legible-weak-guard fixtures (cdio rank 9, calweb
    5/5); its losses are crowding among plausible paths with no
-   legible discriminator (whoogle).
+   legible discriminator (whoogle), at selection time, under
+   either investigator.
 
 7. **Methodological note.** "Verified TP" confounds ranker and investigator
    quality: the gb reruns have identical Jev picks under stub and devin, but
