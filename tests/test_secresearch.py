@@ -740,6 +740,31 @@ class TestGuardCheck(unittest.TestCase):
         self.assertIn("ALLOW", check["env"])
         self.assertEqual(check["kind"], "gate")
 
+    def test_selector_check_transforms(self):
+        # the whoogle element shape: the check rewrites the sink arg on
+        # one outcome instead of filtering; the rewritten names must be
+        # visible so the model can tell a selector from a filter
+        guards = self._guards(
+            "        src_url = url\n"
+            "        if url.startswith('gAAAAA'):\n"
+            "            src_url = url[6:]\n"
+            "        s = requests.Session()\n"
+            "        s.request(method='GET', url=src_url)\n")
+        check = next(g["check"] for g in guards
+                     if "startswith" in g["call"])
+        self.assertIn("src_url", check["transforms"])
+
+    def test_filter_check_has_no_transforms(self):
+        # a pure denylist exits on match and writes nothing
+        guards = self._guards(
+            "        if url.startswith('file:'):\n"
+            "            raise Exception('denied')\n"
+            "        s = requests.Session()\n"
+            "        s.request(method='GET', url=url)\n")
+        check = next(g["check"] for g in guards
+                     if "startswith" in g["call"])
+        self.assertNotIn("transforms", check)
+
 
 class TestSinkInput(unittest.TestCase):
     def _state(self, body: str, header: str = ""):

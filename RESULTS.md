@@ -674,6 +674,43 @@ make_request_to_kobo_store`) score rv 0.64-0.74 / iv 0.90-0.92
 and occupy ranks 5-10, but the legibly-bypassable denylist kept
 the CVE above them.
 
+### Opaque-arm probe: the whoogle selector
+
+Before hunting a second opaque-guard fixture, the one we have
+was worth a closer look. whoogle's element/window guard is not
+a filter at all: `url.startswith('gAAAAA')` selects between a
+Fernet-decrypt path for signed URLs and the raw pass-through
+for everything else. The attacker bypasses it by simply not
+using the prefix. The extracted check misread this as
+`kind: denylist` (the decrypt handler raises on invalid tokens),
+which reads as "prefixed inputs are denied", inverted from the
+real semantics.
+
+`_guard_check` now emits `transforms`: the names each check
+branch reassigns. whoogle's checks read
+`transforms: ["cipher_suite", "src_url"]` / `["target_url"]`,
+and the `guard_bypassable` question explains that a check
+rewriting the sink-bound value on only one outcome is a
+selector, not a filter.
+
+Measured effect (2 probes + full 14-path pool): gb moved up
+~0.1-0.15 (0.70-0.72 -> 0.75-0.85), confirming the legibility
+-> score link in the right direction. The pick line still does
+not move: element/window hold ranks 11-12 of 14 (budget 6)
+because `research_value`, the heaviest dimension at 0.30,
+scores them 0.56-0.59 while the obvious-shape crowd scores
+0.63-0.91. So the opaque arm had *both* gaps: an extraction
+defect (selector read as denylist, now fixed) and, beneath it,
+a judgment the model is honestly making: the feature's contract
+is the vuln (a signed-URL proxy that also accepts unsigned
+URLs), and nothing in the current question set asks whether the
+feature's contract itself is unsafe. That is a sharper
+statement of the remaining boundary than "holistic dims prefer
+obvious shapes": the whoogle miss is not failure to see a weak
+check, it is the model rating "signed-URL proxy accepts
+unsigned URLs" as an ordinary feature because no dimension
+frames contract-level unsafety.
+
 ## Conclusions
 
 1. **Did Jev improve path selection?** Yes, measurably, once candidates
@@ -774,11 +811,19 @@ the CVE above them.
    fetch fixtures is guard legibility: visible weak checks score
    high (cdio ^file:/, calweb 127.), opaque plausible checks
    (whoogle's signature-shaped element guard) score as
-   intended-feature. (j) Next levers: a fixture whose vuln has
-   an INVISIBLE or semantic-only guard (is_safe_url in a helper,
-   a HMAC check whose strength can't be seen from the call site)
-   to test the opaque-guard arm directly, and a larger devin
-   ablation once per-run cost is tolerable.
+   intended-feature. (j) Done: the opaque-arm probe found and
+   fixed a real extraction defect, selector checks misread as
+   denylist, and guard_bypassable moved up ~0.1 in response;
+   but the pick line still does not cross on whoogle because
+   research_value keeps scoring the feature contract itself
+   as ordinary. The residual boundary is now precise: no
+   dimension asks whether the FEATURE'S CONTRACT is unsafe
+   (a signed-URL proxy accepting unsigned URLs), only whether
+   the path's checks are weak. (k) Next levers: a
+   contract-unsafety probe on whoogle (reframe one existing
+   question or add a narrow one, measure whether element/window
+   cross the line), and a larger devin ablation once per-run
+   cost is tolerable.
 
 7. **Methodological note.** "Verified TP" confounds ranker and investigator
    quality: the gb reruns have identical Jev picks under stub and devin, but

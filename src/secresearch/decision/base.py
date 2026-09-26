@@ -155,6 +155,15 @@ def _guard_check(guard, graph: CodeGraph,
     env = [e for e in env if e]
     if env:
         check["env"] = env
+    writes = sorted({
+        t for s in (list(getattr(cond, "body", []))
+                    + list(getattr(cond, "orelse", [])))
+        for n in ast.walk(s)
+        if isinstance(n, (ast.Assign, ast.AnnAssign, ast.AugAssign,
+                          ast.For, ast.AsyncFor, ast.With, ast.AsyncWith))
+        for t in _bound_names(n, subscript_binds=True)})
+    if writes:
+        check["transforms"] = writes
     negated = call is not None and any(
         isinstance(n, ast.UnaryOp) and isinstance(n.op, ast.Not)
         and any(x is call for x in ast.walk(n.operand))
