@@ -844,6 +844,18 @@ whoogle x5, cdio x3, calweb x2 under stub:
   CVE variant `self.watch -> call_browser` was picked every rep.
 - calweb TP 2/2 (FP 7): unchanged.
 
+#### stub8 sweep (contract_gap at 0.30)
+
+Ran the weighting question end to end: contract_gap weight raised
+to 0.30, whoogle x5, cdio x3, calweb x2. Result: window was
+picked in 2/5 whoogle reps, identical to w=0.15; cdio 3/3 and
+calweb 2/2 unchanged (calweb rep1 picked both CVE variants). The
+0.15-point weight delta moves the composite by roughly the same
+amount as per-call score noise at the pick line, so the weight
+lever does not pay off at this scale: the binding constraint on
+who wins the last pick slot is run-to-run Jev variance, not
+weighting. Reverted to 0.15.
+
 ## Conclusions
 
 1. **Did Jev improve path selection?** Yes, measurably, once candidates
@@ -975,11 +987,15 @@ whoogle x5, cdio x3, calweb x2 under stub:
    counterfactual at weight >= 0.30. Shipped at 0.15 under the
    record-don't-tune rule; in the stub7 harness sweep the window
    SSRF was picked in 2/5 whoogle reps, its first selections in
-   any phase, with cdio 3/3 and calweb 2/2 unchanged. The honest
-   interim verdict: jev's wins are legible-weak-guard fixtures
-   (cdio rank 9, calweb 5/5); whoogle's crowding miss now has a
-   discriminating dimension that moved the pick line, and the
-   open question is purely one of weighting policy.
+   any phase, with cdio 3/3 and calweb 2/2 unchanged. The stub8
+   sweep at w=0.30 produced identical picks (2/5), closing the
+   weighting question: per-call score noise at the pick line
+   exceeds any reasonable weight delta, so who wins the last slot
+   is decided by run variance, not weighting. The honest interim
+   verdict: jev's wins are legible-weak-guard fixtures (cdio rank
+   9, calweb 5/5); whoogle's crowding miss now has a
+   discriminating dimension that moved the pick line from 0/15
+   to 2/5, and the residual is score stochasticity.
 
 7. **Methodological note.** "Verified TP" confounds ranker and investigator
    quality: the gb reruns have identical Jev picks under stub and devin, but

@@ -49,7 +49,7 @@ def append(row: dict) -> None:
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("phase", choices=["stub", "devin", "stub-uu", "stub2", "stub3", "stub4", "stub5", "stub6", "stub7", "devin2"])
+    ap.add_argument("phase", choices=["stub", "devin", "stub-uu", "stub2", "stub3", "stub4", "stub5", "stub6", "stub7", "stub8", "devin2"])
     args = ap.parse_args()
 
     # per-fixture budgets: paths must outnumber picks for ranking to matter
@@ -68,7 +68,19 @@ def main() -> None:
               f"FP={m['false_positives']} missed={m['missed']} "
               f"jev_fail={m.get('jev_failures', 0)}", flush=True)
 
-    if args.phase == "stub7":
+    if args.phase == "stub8":
+        # contract_gap at weight 0.30: the counterfactual sweep put
+        # whoogle's window on the pick line at >=0.30 and both CVE paths
+        # inside at >=0.50. The dimension's output is near-binary and
+        # neutral-positive on cdio/calweb, so this sweep measures whether
+        # the weighting policy stabilizes the element/window picks.
+        for rep in range(5):
+            go("whoogle-ssrf", "jev", "stub", 0, rep)
+        for rep in range(3):
+            go("cdio-lfr", "jev", "stub", 0, rep)
+        for rep in range(2):
+            go("calweb-ssrf", "jev", "stub", 0, rep)
+    elif args.phase == "stub7":
         # contract_gap dimension (weight 0.15): asks whether enforcement
         # depends on the attacker opting in (optional verify/decrypt
         # branch forwarding the raw value, env- or config-gated checks).
