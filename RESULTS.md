@@ -711,6 +711,30 @@ check, it is the model rating "signed-URL proxy accepts
 unsigned URLs" as an ordinary feature because no dimension
 frames contract-level unsafety.
 
+#### Contract-unsafety probe (negative)
+
+Tested directly: `research_value`'s instructions were extended
+to count contract-level unsafety as a vulnerability (an endpoint
+accepting unsigned URLs beside signed ones, a fetch whose
+accepted inputs already include dangerous schemes). Two full
+14-path passes: element/window rv rose ~0.06-0.08 (0.56 ->
+0.63-0.68) but the whole pool inflated too, ranks unchanged at
+11-12/14. The probe was reverted; the finding it produced is
+more informative than a flip would have been: rv is answering
+"is this a scary sink shape", not "is this contract unsafe".
+The intended-feature imgres redirect, not in ground truth,
+holds rank 1 at rv 0.93 while the real CVE sits at 0.64. On
+whoogle the miss is now fully decomposed: the pool contains
+~9 genuinely-plausible paths for a 6-pick budget, the ranker
+scores them all "possible", and the CVE does not stand out on
+any dimension a single scalar can carry. A dedicated
+contract-unsafety dimension might separate (element's contract
+is unsafe in a way config's open() is not), but the weight
+sensitivity result warns a 0.15-weight signal can be outvoted
+again; the honest read is that whoogle's pick failure is
+crowding plus sink-shape bias in the holistic scores, and the
+measurable signal that remains is small.
+
 ## Conclusions
 
 1. **Did Jev improve path selection?** Yes, measurably, once candidates
@@ -819,11 +843,21 @@ frames contract-level unsafety.
    as ordinary. The residual boundary is now precise: no
    dimension asks whether the FEATURE'S CONTRACT is unsafe
    (a signed-URL proxy accepting unsigned URLs), only whether
-   the path's checks are weak. (k) Next levers: a
-   contract-unsafety probe on whoogle (reframe one existing
-   question or add a narrow one, measure whether element/window
-   cross the line), and a larger devin ablation once per-run
-   cost is tolerable.
+   the path's checks are weak. (k) Done: the
+   contract-unsafety probe on whoogle (rv instructions extended
+   to count unsafe contracts as vulns) was run and reverted: rv
+   rose ~0.07 on the CVE paths but the whole pool inflated and
+   ranks held at 11-12/14. The decomposition is now complete:
+   rv scores sink shape, not contract safety (intended imgres
+   redirect tops the pool at 0.93), and whoogle's pick failure
+   is crowding among ~9 plausible paths, not a single
+   mis-scored fact. (l) Remaining levers: a dedicated
+   contract-unsafety dimension (uncertain payoff given the
+   weight-sensitivity result) and the devin ablation once
+   per-run cost is tolerable. The honest interim verdict: jev's
+   wins are legible-weak-guard fixtures (cdio rank 9, calweb
+   5/5); its losses are crowding among plausible paths with no
+   legible discriminator (whoogle).
 
 7. **Methodological note.** "Verified TP" confounds ranker and investigator
    quality: the gb reruns have identical Jev picks under stub and devin, but
