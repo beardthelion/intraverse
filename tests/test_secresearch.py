@@ -912,6 +912,57 @@ class TestSinkInput(unittest.TestCase):
         self.assertFalse(si["scheme_control"])
 
 
+class TestContractGap(unittest.TestCase):
+    def test_pathscores_roundtrips_contract_gap(self):
+        from secresearch.models import PathScores
+        s = PathScores(contract_gap=0.7)
+        self.assertAlmostEqual(
+            PathScores.from_dict(s.to_dict()).contract_gap, 0.7)
+
+    def test_score_path_maps_contract_gap(self):
+        from secresearch.decision.jev import JevDecisionModel
+        from secresearch.models import RunStats
+
+        class FakeClient:
+            def evaluate(self, state, questions=None):
+                return {"answers": {"contract_gap": {"noul": 0.85}},
+                        "usage": {}}
+
+        graph, paths = analyze("vuln-fetch")
+        checker = InvariantChecker(graph)
+        model = JevDecisionModel(client=FakeClient())
+        self.assertAlmostEqual(
+            model.score_path(paths[0], graph, checker, RunStats()).contract_gap,
+            0.85)
+
+    def test_fallback_scores_contract_gap_neutral(self):
+        from secresearch.decision.jev import JevDecisionModel
+        from secresearch.models import RunStats
+
+        class FailingClient:
+            def evaluate(self, state, questions=None):
+                raise RuntimeError("down")
+
+        graph, paths = analyze("vuln-fetch")
+        checker = InvariantChecker(graph)
+        model = JevDecisionModel(client=FailingClient())
+        s = model.score_path(paths[0], graph, checker, RunStats())
+        self.assertEqual(s.contract_gap, 0.5)
+
+    def test_contract_gap_question_registered(self):
+        # deleting the QUESTIONS entry silently disables the dimension:
+        # the API never returns the answer and _noul defaults to 0.5
+        from secresearch.decision.jev import QUESTIONS
+        self.assertIn("contract_gap", QUESTIONS)
+
+    def test_priority_includes_contract_gap_weight(self):
+        from secresearch.models import PathScores
+        cfg = ScanConfig()
+        base = PathScores(estimated_cost=0.5)
+        boosted = PathScores(estimated_cost=0.5, contract_gap=1.0)
+        self.assertGreater(cfg.priority(boosted), cfg.priority(base))
+
+
 class TestConfigDefaults(unittest.TestCase):
     def test_max_paths_matches_generator_default(self):
         # benchmark runs truncated stored-source paths for two phases

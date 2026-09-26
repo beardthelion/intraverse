@@ -49,7 +49,7 @@ def append(row: dict) -> None:
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("phase", choices=["stub", "devin", "stub-uu", "stub2", "stub3", "stub4", "stub5", "stub6", "devin2"])
+    ap.add_argument("phase", choices=["stub", "devin", "stub-uu", "stub2", "stub3", "stub4", "stub5", "stub6", "stub7", "devin2"])
     args = ap.parse_args()
 
     # per-fixture budgets: paths must outnumber picks for ranking to matter
@@ -68,7 +68,21 @@ def main() -> None:
               f"FP={m['false_positives']} missed={m['missed']} "
               f"jev_fail={m.get('jev_failures', 0)}", flush=True)
 
-    if args.phase == "devin2":
+    if args.phase == "stub7":
+        # contract_gap dimension (weight 0.15): asks whether enforcement
+        # depends on the attacker opting in (optional verify/decrypt
+        # branch forwarding the raw value, env- or config-gated checks).
+        # Probes put whoogle's element/window at 0.70-0.85 vs the crowd's
+        # 0.09-0.39, the first dimension to rank them above the config
+        # family. whoogle x5 is the primary measurement (window sits at
+        # the 6-pick line); cdio x3 and calweb x2 check for regressions.
+        for rep in range(5):
+            go("whoogle-ssrf", "jev", "stub", 0, rep)
+        for rep in range(3):
+            go("cdio-lfr", "jev", "stub", 0, rep)
+        for rep in range(2):
+            go("calweb-ssrf", "jev", "stub", 0, rep)
+    elif args.phase == "devin2":
         # devin ablation on the OSS fixtures: does a real investigator
         # confirm what jev selects? calweb is the clean win under stub
         # (5/5 picks); cdio straddles the line; whoogle is the crowded

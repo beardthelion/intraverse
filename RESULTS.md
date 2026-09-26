@@ -776,6 +776,74 @@ Three findings.
 One caveat: cdio rep1 had jev_fail=8 (scoring calls failed
 mid-run) and the CVE was still picked and verified.
 
+### contract_gap dimension (post-devin2 lever)
+
+The residual boundary after the contract-unsafety probe was that
+no dimension asks whether the feature's contract itself is
+unsafe. A first probe question phrased that way ("does the code
+admit a broader input class than the implied contract") failed:
+it scored whoogle's element/window at 0.57-0.65, no higher than
+the crowd, though it did correctly score the intended-feature
+imgres redirect low (0.58-0.62). The discriminating phrasing
+turned out to be about the enforcement mechanism, not the
+contract: "does enforcement on this path depend on the attacker
+opting in?" covers optional signature/decrypt branches that
+forward the raw value on the else side, env- or config-gated
+checks, and marker-prefix selectors between verified and
+unverified handling.
+
+Scored on whoogle's 14 paths (2 reps): element 0.70-0.72, window
+0.85, against a crowd at 0.09-0.39 with two exceptions
+(send_file 0.67-0.71, pickle.loads 0.74-0.77, both of which do
+have conditional enforcement shapes). imgres dropped to
+0.09-0.10. This is the first dimension that ranks the whoogle
+CVE above the config family rather than merely near it.
+
+Regression probes on the other fixtures: calweb's env-gated
+denylist reads as exactly this class (CVE at 0.74-0.83 while its
+top-15 crowd scores 0.10-0.57), and cdio is a wash (CVE family
+0.60-0.80, pinned siblings 0.61-0.84, no separation either way).
+
+Counterfactual rank sweep over stored dimension scores plus
+fresh contract_gap values (whoogle uses probe means):
+
+| weight | cdio best CVE rank | calweb | whoogle element/window |
+|--------|--------------------|--------|------------------------|
+| 0.00   | 13                 | 1, 3   | 10, 12 |
+| 0.15   | 12                 | 1, 3   | 6-12, 6-11 (fresh pass: 12, 8) |
+| 0.30   | 10                 | 1, 3   | 6-9, 6-8 |
+| 0.50   | 10                 | 1, 2   | 3-8, 4-7 |
+| 1.00   | 11                 | 1, 2   | 2-5, 4 |
+
+(whoogle's two rank sets differ because the stored pool was
+scored before the transforms fix; the fresh pass with all
+questions is the authoritative row.)
+
+The weight decision keeps 0.15, same record-don't-tune rule as
+sink_reach, but the case for this dimension is different: its
+output is near-binary (opt-in enforcement present or not) rather
+than a soft holistic judgment, and it is neutral-to-positive on
+all three fixtures rather than flattering one. The sweep shows
+window crosses the 6-pick line at >= 0.30 and both CVE paths at
+>= 0.50; whether a near-binary signal deserves a heavier weight
+is a policy question recorded here rather than tuned into the
+default.
+
+#### stub7 sweep (harness confirmation)
+
+whoogle x5, cdio x3, calweb x2 under stub:
+
+- whoogle TP 4,4,4,3,4 (FP 2-3): the window SSRF was picked as a
+  verified TP in reps 0 and 4, the first harness picks of the
+  element/window CVE in any phase. In the other reps the last
+  slot went to an `os.environ` outbound variant or a non-truth
+  deserialization path. The CVE now straddles the pick line the
+  same way cdio's did: 2/5 selection at w=0.15 versus 0/15+
+  selections across all earlier whoogle sweeps.
+- cdio TP 3/3 (FP 11): consistent with the straddling rank; the
+  CVE variant `self.watch -> call_browser` was picked every rep.
+- calweb TP 2/2 (FP 7): unchanged.
+
 ## Conclusions
 
 1. **Did Jev improve path selection?** Yes, measurably, once candidates
@@ -899,13 +967,19 @@ mid-run) and the CVE was still picked and verified.
    of calweb's, showing stub FP overstates what a real pipeline
    emits. It also confirmed the boundary: whoogle's element/window
    stayed unpicked because the investigator only sees what the
-   ranker selects. Remaining lever: a dedicated
-   contract-unsafety dimension (uncertain payoff given the
-   weight-sensitivity result). The honest interim verdict: jev's
-   wins are legible-weak-guard fixtures (cdio rank 9, calweb
-   5/5); its losses are crowding among plausible paths with no
-   legible discriminator (whoogle), at selection time, under
-   either investigator.
+   ranker selects. (m) Done: the contract_gap dimension, phrased
+   as "does enforcement depend on the attacker opting in", is the
+   first signal that separates whoogle's element/window from the
+   config family (0.70-0.85 vs 0.09-0.39), is neutral-to-positive
+   on cdio and calweb, and crosses whoogle's pick line in the
+   counterfactual at weight >= 0.30. Shipped at 0.15 under the
+   record-don't-tune rule; in the stub7 harness sweep the window
+   SSRF was picked in 2/5 whoogle reps, its first selections in
+   any phase, with cdio 3/3 and calweb 2/2 unchanged. The honest
+   interim verdict: jev's wins are legible-weak-guard fixtures
+   (cdio rank 9, calweb 5/5); whoogle's crowding miss now has a
+   discriminating dimension that moved the pick line, and the
+   open question is purely one of weighting policy.
 
 7. **Methodological note.** "Verified TP" confounds ranker and investigator
    quality: the gb reruns have identical Jev picks under stub and devin, but

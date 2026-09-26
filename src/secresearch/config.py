@@ -18,6 +18,7 @@ DEFAULT_WEIGHTS = {
     "guard_bypassable": 0.15,
     "unintended_use": 0.15,
     "sink_reach": 0.15,
+    "contract_gap": 0.15,
     "state_manipulation": 0.02,
 }
 

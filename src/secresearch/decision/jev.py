@@ -114,6 +114,22 @@ QUESTIONS: dict[str, dict] = {
             "even if the pinned endpoint's response is stored or parsed."
         ),
     },
+    "contract_gap": {
+        "type": "noul",
+        "instructions": (
+            "Does enforcement on this path depend on the attacker opting "
+            "in? Answer high when the code verifies a property of the "
+            "input only conditionally and still uses the input when the "
+            "property is absent: an optional signature/decrypt/validation "
+            "branch whose else-case forwards the raw value, a check that "
+            "only fires under an env var or config flag that may be "
+            "unset, a marker prefix that selects between a verified and "
+            "an unverified handling of the same input. Answer low when "
+            "verification is unconditional, when no verification exists "
+            "and none is implied, or when the endpoint's job is exactly "
+            "to forward the given input."
+        ),
+    },
     "research_value": {
         "type": "score",
         "instructions": "How likely is deep investigation of this path to produce a real, exploitable vulnerability?",
@@ -234,7 +250,8 @@ class JevDecisionModel(DecisionModel):
                 authz_boundary_crossing=0.5, sensitive_sink=0.5,
                 insufficient_validation=0.5, invariant_violation=0.5,
                 research_value=0.5, guard_bypassable=0.5 if guarded else 0.0,
-                unintended_use=0.5, sink_reach=0.5, estimated_cost=0.6,
+                unintended_use=0.5, sink_reach=0.5, contract_gap=0.5,
+                estimated_cost=0.6,
                 continue_exploration=0.5,
                 raw={"error": str(e)},
             )
@@ -256,6 +273,7 @@ class JevDecisionModel(DecisionModel):
             guard_bypassable=bypass,
             unintended_use=_noul(answers.get("unintended_use", {})),
             sink_reach=_noul(answers.get("sink_reach", {})),
+            contract_gap=_noul(answers.get("contract_gap", {})),
             estimated_cost=0.2 + 0.8 * _score01(answers.get("investigation_cost", {})),
             continue_exploration=_noul(answers.get("continue_exploration", {})),
             raw={"answers": answers, "model": resp.get("model")},
