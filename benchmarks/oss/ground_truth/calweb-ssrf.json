@@ -1,0 +1,10 @@
+[
+  {
+    "class": "outbound_request",
+    "sink_file": "cps/helper.py",
+    "sink_function": "save_cover_from_url",
+    "sink_line": 593,
+    "route": "/admin/book/<int:book_id>",
+    "note": "CVE-2022-0339 family SSRF at calibre-web 0.6.16: edit_book cover_url -> save_cover_from_url -> requests.get(url) behind a getaddrinfo + '127.' denylist, redirects still followed"
+  }
+]

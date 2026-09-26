@@ -624,6 +624,56 @@ crowd above is also correctly scored on it, the miss lives in
 `research_value`/`invariant_violation`, which reward the obvious
 vuln shape over the subtle one.
 
+### calweb-ssrf: the subtle-shape hypothesis fails on a third fixture
+
+Fourth fixture: **calibre-web @ 0.6.16** (CVE-2022-0339 family,
+GHSA-4w8p-x6g8-fv64): the `/admin/book/<id>` edit endpoint saves a
+cover from `cover_url` via `save_cover_from_url`, which runs a
+getaddrinfo + `ip.startswith("127.")` denylist before
+`requests.get(url)` with redirects still followed. 60 Python
+files, 67 enumerated paths, ONE CVE, budget 10.
+
+The fixture was chosen to test the whoogle diagnosis: does a
+feature-intended fetch behind a check get under-scored by the
+holistic dimensions? Measured answer: **no, and the distinction
+is guard legibility, not feature shape.** A full-pool scoring
+pass put both CVE variants at ranks 1 and 3 of 67:
+
+| path | rank | gb | rv | iv | sr |
+|------|------|----|----|----|----|
+| `http.request -> save_cover_from_url -> requests.get` | 1/67 | 0.84 | 0.72 | 0.88 | 0.83 |
+| `request.form.to_dict -> /admin/book -> save_cover_from_url -> requests.get` | 3/67 | 0.81 | 0.67 | 0.87 | 0.81 |
+
+The `ip.startswith("127.")` check is *legibly weak*: its pattern,
+subject, and deny shape are all extracted into `state.guards`,
+and the model can enumerate bypasses (0.0.0.0, unlisted loopback
+encodings, redirect following) without any new capability. That
+legibility lifts `guard_bypassable` (0.81-0.84) AND the holistic
+scores, which is where whoogle's element/window paths lost:
+whoogle's `/element` guard reads as a signature-shaped allowlist
+(`gAAAAA...` prefix), so nothing in the state tells the model
+the check is weak, and the flow scores as intended-feature.
+The discriminator across the three fetch fixtures is not
+"subtle vs obvious" but whether the guard's content is visible
+enough to enumerate a bypass.
+
+#### stub6 sweep (harness confirmation)
+
+| fixture | n | TP | FP | note |
+|---------|---|----|----|------|
+| calweb-ssrf jev | 5 | 1,1,1,1,1 | 7 each | CVE picked and stub-confirmed every rep |
+| calweb-ssrf static | 1 | 0 | 10 | missed |
+| calweb-ssrf baseline | 1 | 0 | 10 | missed |
+
+Jev 5/5 vs heuristics 0/2 is the cleanest ranker separation on
+an OSS fixture so far. The FP=7 is the stub investigator's known
+inability to falsify (it confirms most picks), not a ranking
+signal. The crowd above budget was real: the kobo-store proxy
+endpoints (`/v1/* -> redirect_or_proxy_request ->
+make_request_to_kobo_store`) score rv 0.64-0.74 / iv 0.90-0.92
+and occupy ranks 5-10, but the legibly-bypassable denylist kept
+the CVE above them.
+
 ## Conclusions
 
 1. **Did Jev improve path selection?** Yes, measurably, once candidates
@@ -714,11 +764,21 @@ vuln shape over the subtle one.
    discriminating dimension itself, and the miss lives in
    `research_value`/`invariant_violation` preferring obvious vuln
    shapes. Aggregation was the story on cdio; holistic judgment
-   is the story on whoogle. (i) Next levers: the n-rep question
-   for whoogle's earlier 4/5 -> 0/3 flip (now largely explained , 
-   pool crowding plus holistic-score drift), a third fixture to
-   test whether subtle-shape under-scoring is general, and a
-   larger devin ablation once per-run cost is tolerable.
+   is the story on whoogle. (i) Done: third fixture (calweb-ssrf,
+   calibre-web 0.6.16, 67 paths, budget 10) tested the
+   subtle-shape hypothesis and narrowed it: jev picked the CVE
+   5/5 (ranks 1 and 3 in the scoring pass) where static and
+   baseline both missed, because the `ip.startswith("127.")`
+   denylist is legibly weak and lifts guard_bypassable plus the
+   holistic scores. The real discriminator across the three
+   fetch fixtures is guard legibility: visible weak checks score
+   high (cdio ^file:/, calweb 127.), opaque plausible checks
+   (whoogle's signature-shaped element guard) score as
+   intended-feature. (j) Next levers: a fixture whose vuln has
+   an INVISIBLE or semantic-only guard (is_safe_url in a helper,
+   a HMAC check whose strength can't be seen from the call site)
+   to test the opaque-guard arm directly, and a larger devin
+   ablation once per-run cost is tolerable.
 
 7. **Methodological note.** "Verified TP" confounds ranker and investigator
    quality: the gb reruns have identical Jev picks under stub and devin, but

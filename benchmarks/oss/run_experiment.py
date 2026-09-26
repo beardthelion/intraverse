@@ -49,11 +49,12 @@ def append(row: dict) -> None:
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("phase", choices=["stub", "devin", "stub-uu", "stub2", "stub3", "stub4", "stub5"])
+    ap.add_argument("phase", choices=["stub", "devin", "stub-uu", "stub2", "stub3", "stub4", "stub5", "stub6"])
     args = ap.parse_args()
 
     # per-fixture budgets: paths must outnumber picks for ranking to matter
-    budgets = {"whoogle-ssrf": 6, "alerta-sqli": 12, "cdio-lfr": 12}
+    budgets = {"whoogle-ssrf": 6, "alerta-sqli": 12, "cdio-lfr": 12,
+               "calweb-ssrf": 10}
 
     def go(fixture, strategy, agent, seed, rep):
         if done(args.phase, fixture, strategy, rep):
@@ -67,7 +68,18 @@ def main() -> None:
               f"FP={m['false_positives']} missed={m['missed']} "
               f"jev_fail={m.get('jev_failures', 0)}", flush=True)
 
-    if args.phase == "stub5":
+    if args.phase == "stub6":
+        # calweb-ssrf (calibre-web 0.6.16, 67 paths, budget 10): tests
+        # whether the holistic dimensions under-score the subtle shape:
+        # a feature-intended cover fetch behind a bypassable '127.'
+        # getaddrinfo denylist. jev x5 primary; static/baseline x1 each
+        # as heuristic reference.
+        for rep in range(5):
+            go("calweb-ssrf", "jev", "stub", 0, rep)
+        for rep in range(1):
+            go("calweb-ssrf", "static", "stub", 0, rep)
+            go("calweb-ssrf", "baseline", "stub", 0, rep)
+    elif args.phase == "stub5":
         # sink_input reach semantics: call-site-aware scheme_control splits
         # attacker-named fetch targets (expression, sc=true) from pinned
         # ones (prefix_expr/literal, sc=false). cdio jev x5 primary;

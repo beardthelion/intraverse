@@ -50,6 +50,14 @@ CDIO_TRUTH = {
                           "user-stored:self.watch", "user-stored:self.datastore"}),
 }
 
+# calweb: calibre-web 0.6.16 GHSA-4w8p-x6g8-fv64 family: cover_url reaches
+# requests.get via save_cover_from_url behind a bypassable getaddrinfo '127.'
+# denylist. 'http.request' is the analyzer's source label for the same flow.
+CALWEB_VULN_ENTRIES = {"/admin/book/<int:book_id>", "http.request"}
+CALWEB_TRUTH = {
+    "outbound_request": ("cps/helper.py", 593, CALWEB_VULN_ENTRIES),
+}
+
 LOC = re.compile(r"@(\S+):(\d+)")
 
 
@@ -104,6 +112,13 @@ def score_fixture(fixture: str, run_dir: Path):
                   and entry in ALERTA_VULN_ROUTES)
         elif fixture == "cdio-lfr":
             spec = CDIO_TRUTH.get(cls)
+            if spec:
+                tfile, tline, entries = spec
+                ok = (sfile.endswith(tfile)
+                      and abs(sline - tline) <= 1
+                      and entry in entries)
+        elif fixture == "calweb-ssrf":
+            spec = CALWEB_TRUTH.get(cls)
             if spec:
                 tfile, tline, entries = spec
                 ok = (sfile.endswith(tfile)
