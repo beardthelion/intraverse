@@ -35,11 +35,20 @@ Strategies: `jev` | `static` | `random` | `baseline`. Agents: `stub` |
 `devin`. Scoring weights, cost exponent, and budgets live in `ScanConfig`
 (`--config file.json`).
 
-## Benchmark dataset
+## Benchmark datasets
 
-`benchmarks/fixtures/*` are small stdlib-only HTTP apps with planted
-vulnerabilities; `benchmarks/ground_truth/<name>.json` holds the expected
-findings outside the indexed tree.
+Three corpora, each with ground truth outside the indexed tree:
+
+- `benchmarks/fixtures/*`: small stdlib-only HTTP apps with planted
+  vulnerabilities; truth in `benchmarks/ground_truth/<name>.json`.
+- `benchmarks/dense/`: a larger generated corpus plus run/aggregate/rescore
+  scripts (`gen_corpus.py`, `run_experiment.py`).
+- `benchmarks/oss/`: the main experiment. Real OSS code vendored at pinned
+  vulnerable versions (`cdio-lfr`, `whoogle-ssrf`, `alerta-sqli`,
+  `calweb-ssrf`; each fixture ships its own LICENSE) with ground truth
+  keyed to real CVEs. `python3 benchmarks/oss/run_experiment.py <phase>`
+  runs repeated sweeps into `runs/oss/`, and `score.py` re-scores a run
+  directory with route-aware matching.
 
 ## Tests
 
